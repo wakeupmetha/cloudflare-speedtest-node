@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh repo *)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(node --check src/client.js)",
+      "Bash(node --check src/stats.js)",
+      "Bash(node --check src/latency.js)",
+      "Bash(node --check src/throughput.js)",
+      "Bash(node --check src/speedtest.js)",
+      "Bash(PORT=18080 AUTH_TOKEN=testtoken node src/index.js)",
+      "Bash(curl -fsS http://127.0.0.1:18080/health)",
+      "Bash(curl -sS http://127.0.0.1:18080/health)",
+      "Bash(curl -sS -o /dev/null -w \"noauth=%{http_code}\\\\n\" http://127.0.0.1:18080/speedtest)",
+      "Bash(curl -sS -o /dev/null -w \"auth_unknown=%{http_code}\\\\n\" -H \"Authorization: Bearer wrong\" http://127.0.0.1:18080/speedtest/last)",
+      "Bash(PORT=18081 AUTH_TOKEN=testtoken DOWNLOAD_SEC=4 UPLOAD_SEC=4 LATENCY_SAMPLES=5 CONCURRENCY=4 node src/index.js)",
+      "Bash(curl -fsS http://127.0.0.1:18081/health)",
+      "Bash(curl -sS -H \"Authorization: Bearer testtoken\" http://127.0.0.1:18081/speedtest)",
+      "Bash(curl -sS https://speed.cloudflare.com/meta)",
+      "Bash(curl -sSI https://speed.cloudflare.com/meta)",
+      "Bash(curl -sS https://speed.cloudflare.com/cdn-cgi/trace)"
+    ]
+  }
+}

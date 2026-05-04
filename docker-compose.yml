@@ -1,0 +1,59 @@
+# Sample compose for a speedtest agent on a VPN node.
+#
+# One agent per VPN node — drop this file alongside your existing
+# remnawave-node / xray-node compose, set the env in `.env`, and run:
+#
+#   docker compose up -d --build
+#
+# The aerio CRM panel pulls from this agent over HTTPS using the same
+# AUTH_TOKEN. Generate one with:  openssl rand -hex 24
+#
+# Port: 9101. Sits in the Prometheus exporter range (9100 = node_exporter,
+# 9090 = Prometheus, etc) — same family as other host-level metrics
+# agents, which is what this is. Don't change unless 9101 is already
+# taken on the host; the panel's SPEEDTEST_AGENTS env assumes 9101 by
+# default and we'd rather collisions stay rare than have a per-host
+# port soup to manage.
+
+services:
+  speedtest:
+    container_name: aerio-speedtest
+    build: .
+    image: aerio/speedtest-agent:latest
+    restart: unless-stopped
+    environment:
+      # Per-node identity stamped onto every result. Use the same code
+      # the Remnawave panel knows the node by (e.g. "de-fra-1") so the
+      # CRM can pair speedtest data with the right node card.
+      SERVER_ID: ${SERVER_ID}
+      # Bearer token the CRM uses on every request. Required in prod.
+      AUTH_TOKEN: ${AUTH_TOKEN}
+      # 30 minutes — matches the panel's expected cadence.
+      INTERVAL_MS: ${INTERVAL_MS:-1800000}
+      # ±15 % spread so a fleet of agents that boot in the same window
+      # don't all hit Cloudflare at the same second.
+      JITTER_PCT: ${JITTER_PCT:-0.15}
+      # Lighter speedtest knobs — see src/index.js for defaults.
+      CONCURRENCY: ${CONCURRENCY:-4}
+      DOWNLOAD_SEC: ${DOWNLOAD_SEC:-5}
+      UPLOAD_SEC: ${UPLOAD_SEC:-5}
+      LATENCY_SAMPLES: ${LATENCY_SAMPLES:-20}
+      # How many rows to keep on disk. 1500 rows × 30 min ≈ 31 days.
+      MAX_HISTORY: ${MAX_HISTORY:-1500}
+    ports:
+      # 9101 on both sides — one agent per VPN node, no port shuffling
+      # needed. The CRM panel reads from https://<host>:9101/speedtest/*.
+      - "${PUBLIC_PORT:-9101}:9101"
+    volumes:
+      # Persistent history — survives container recreations. Drop the
+      # named volume entirely if you're fine losing rows on `down -v`.
+      - speedtest-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9101/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  speedtest-data:

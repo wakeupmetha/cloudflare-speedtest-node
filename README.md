@@ -35,13 +35,29 @@ All routes return JSON. Everything except `/health` requires
 
 ```bash
 cp .env.example .env
-# edit .env: set SERVER_ID + AUTH_TOKEN
+# edit .env: set SERVER_ID (must match the Remnawave node name).
+# Generate AUTH_TOKEN inside the aerio CRM:
+#   /nodes → click the key icon on this node's card → Generate.
+# Paste the displayed JWT into AUTH_TOKEN here.
 docker compose up -d --build
 
 # probe from the host
 curl http://localhost:9101/health
 curl -H "Authorization: Bearer $AUTH_TOKEN" http://localhost:9101/speedtest/last
 ```
+
+## Token rotation
+
+The CRM owns the token lifecycle:
+
+1. Open `/nodes` in the panel, find the card for this node.
+2. Click the key icon → "Rotate".
+3. Copy the new JWT (shown once), paste into this node's `AUTH_TOKEN`,
+   `docker compose up -d` to restart.
+
+Until step 3 lands the agent will reject panel polls (401), and the
+card shows the stale-data badge. Skipping the rotation entirely is
+fine — old tokens never expire on the agent side.
 
 ## Bandwidth budget
 

@@ -42,12 +42,12 @@ The same protocol applies in sibling repos (`aerio-crm`, `aerio-v2`, `aerio-web`
 | Status | **in-dev, not deployed** |
 | Language | Node.js (ES modules, no third-party dependencies) |
 | Runtime | Node ≥ 18 (Dockerfile pins `node:20-alpine`) |
-| Source size | 639 LOC across 9 modules ([src/](src/)) |
+| Source size | 790 LOC across 11 modules ([src/](src/)) |
 | HTTP port | **9101** (Prometheus exporter range — adjacent to `node_exporter` on 9100; signals "host-level metrics exporter" intent to anyone reading compose) |
 | Storage | One ndjson file per node, ring-buffer-capped (default 1500 rows ≈ 31 days at 30-min cadence) |
-| Outbound traffic | Only to `speed.cloudflare.com`. **Never initiates calls to the CRM** — the panel pulls. |
+| Outbound traffic | `speed.cloudflare.com` (every run) + `ip-api.com` (once at boot, for IP/geo identity). **Never initiates calls to a consumer** — consumers pull. |
 | Deployment model | One agent per VPN node, alongside `xray` / `remnawave-node` containers |
-| Sibling projects | `aerio-crm` (consumer, see §10), `aerio-v2` (manages the panel that issues this agent's `AUTH_TOKEN`) |
+| Sibling projects | `aerio-crm` (consumer, see §10), `aerio-v2` (panel; one possible consumer of this agent's API) |
 
 ### Integration contract with the aerio CRM (planned)
 
@@ -55,19 +55,20 @@ The agent exposes 4 routes on port 9101. The CRM's local Fastify service ([aerio
 
 ```
 GET https://<node-host>:9101/speedtest/last
-Authorization: Bearer <per-node JWT>
+Authorization: Bearer <TOKEN>
 ```
 
 Returns the most recent cached run as JSON, or `404 {"error": "no result yet"}` until the first scheduled run completes (default first delay 5s + 5s download + 5s upload + serialization ≈ 15s after boot).
 
-The agent's `AUTH_TOKEN` is **issued by the panel**, not generated locally. Flow:
+The agent's `TOKEN` is a **shared secret set by the operator** in this node's `.env` — the agent owns its own token; nothing issues it. The agent runs fully standalone: clone the repo, set `PORT` + `TOKEN`, `docker compose up`, and it schedules runs and serves results on its own. A consumer (the CRM panel, a curl probe, any poller) authenticates by presenting the same `TOKEN`. Flow:
 
-1. Operator opens the panel `/nodes` page (in `aerio-crm`)
-2. Clicks the key icon on this node's card → "Generate" (or "Rotate")
-3. Panel displays the JWT once, persists a hash in `speedtest_tokens` table
-4. Operator pastes the JWT into this agent's `AUTH_TOKEN` env, restarts the container
+1. Operator generates a secret (`openssl rand -hex 24`) and sets `TOKEN` in `.env`
+2. `docker compose up -d` — the agent starts and begins serving
+3. Operator gives the same value to whatever will poll this node (e.g. the CRM panel's per-node config)
 
-**Status:** the panel side of the rotation flow exists in [aerio-crm/src/server/repos/speedtest-tokens.ts](../aerio-crm/src/server/repos/speedtest-tokens.ts) and [aerio-crm/src/server/actions/speedtest.ts](../aerio-crm/src/server/actions/speedtest.ts), but has never been validated against a real agent. Scheduled to migrate to `aerio-v2/services/web-api` per the [drop-direct-db spec](../aerio-crm/docs/superpowers/specs/2026-05-19-crm-drop-direct-db-design.md). When that ships, the panel UI URL changes but the agent-side contract stays the same.
+**Empty token is fatal:** the agent refuses to start with an empty `TOKEN` (fail-fast, `exit 1`) so it can never come up as an open API on a public port. See §4.
+
+**Status:** the CRM panel still has per-node token storage on its side ([aerio-crm/src/server/repos/speedtest-tokens.ts](../aerio-crm/src/server/repos/speedtest-tokens.ts), [aerio-crm/src/server/actions/speedtest.ts](../aerio-crm/src/server/actions/speedtest.ts)), but that is now just the panel remembering the operator-set secret — the agent does not depend on it and is never told about it out of band. Never validated against a real agent. Token storage is scheduled to migrate to `aerio-v2/services/web-api` per the [drop-direct-db spec](../aerio-crm/docs/superpowers/specs/2026-05-19-crm-drop-direct-db-design.md); the agent-side contract is unaffected.
 
 ---
 
@@ -77,7 +78,7 @@ The agent's `AUTH_TOKEN` is **issued by the panel**, not generated locally. Flow
 
 ```bash
 npm install   # writes lockfile only — there are no third-party deps to install
-AUTH_TOKEN=devtok SERVER_ID=local INTERVAL_MS=120000 npm start
+TOKEN=devtok INTERVAL_MS=120000 npm start
 ```
 
 The 2-minute interval is friendly for iteration. Floor enforced by the scheduler at 60s — anything below is silently raised.
@@ -88,12 +89,14 @@ curl -H "Authorization: Bearer devtok" http://localhost:9101/speedtest/last
 curl -H "Authorization: Bearer devtok" http://localhost:9101/speedtest
 ```
 
+The agent will not boot without `TOKEN` set — an empty value is fatal (fail-fast, `exit 1`), printed as a framed error box.
+
 ### With Docker (matches production deployment)
 
 ```bash
 cp .env.example .env
-# Edit .env: set SERVER_ID and AUTH_TOKEN.
-# AUTH_TOKEN must match what the panel issued for this node — see §1.
+# Edit .env: set TOKEN (your own shared secret, openssl rand -hex 24).
+# No SERVER_ID — the node self-identifies by IP/geo. See §1.
 docker compose up -d --build
 docker compose logs -f speedtest
 ```
@@ -137,7 +140,7 @@ No tests, no linter, no formatter configured. Adding any of these is fair game; 
 └─────────────────────────────────────────────────────────────────┘
        │                                          ▲
        │ HTTPS to speed.cloudflare.com            │ HTTPS poll from panel
-       ▼                                          │ (Bearer AUTH_TOKEN)
+       ▼                                          │ (Bearer TOKEN)
    Cloudflare edge                            aerio-crm services/api
 ```
 
@@ -147,34 +150,46 @@ Modules in [src/](src/):
 
 | File | LOC | Responsibility |
 |---|---|---|
-| `index.js` | 68 | Boot — reads env, constructs scheduler + store + HTTP server, wires SIGINT/SIGTERM |
-| `server.js` | 102 | HTTP routes and auth check |
-| `scheduler.js` | 106 | Run-loop, jitter, in-flight sharing, error logging |
-| `storage.js` | 110 | ndjson read/write, ring buffer, compaction |
-| `speedtest.js` | 47 | Orchestrates one run — calls latency + throughput, normalizes the result |
-| `latency.js` | 26 | Latency + jitter samples (small HEAD requests to Cloudflare) |
+| `index.js` | 85 | Boot — reads env, fail-fast on empty `TOKEN`, looks up IP/geo identity, constructs scheduler + store + HTTP server, prints the boot banner, wires SIGINT/SIGTERM |
 | `throughput.js` | 116 | Multi-stream download + upload measurement |
+| `storage.js` | 110 | ndjson read/write, ring buffer, compaction |
+| `scheduler.js` | 109 | Run-loop, jitter, in-flight sharing, per-run pretty logging |
+| `server.js` | 102 | HTTP routes and auth check |
+| `format.js` | 84 | Pretty box-drawing terminal output — boot banner, per-run result/failure boxes, fatal box |
+| `geo.js` | 47 | One-shot IP/location lookup via ip-api.com — the node's identity, in place of a manual SERVER_ID |
+| `speedtest.js` | 47 | Orchestrates one run — calls latency + throughput, normalizes the result |
 | `stats.js` | 37 | Mean / median / quartile helpers |
 | `client.js` | 27 | Bare HTTP client for Cloudflare endpoints |
+| `latency.js` | 26 | Latency + jitter samples (small HEAD requests to Cloudflare) |
 
 **No third-party deps.** Everything uses Node's built-in `node:http`, `node:fs/promises`, `node:os`, `node:url`, `node:crypto`.
+
+### Logging
+
+The agent logs to stdout/stderr only (no log file; `docker compose logs` collects it). Output is framed with box-drawing characters so a local operator can read run results without the panel:
+
+- **Boot banner** (`format.bootBanner`) — public IP + location (city, country), listen address, auth state, interval, history size.
+- **Per-run box** (`format.runBox`, emitted by the scheduler) — run number, elapsed, download/upload median + min──max, latency median + jitter. Failures render a one-line `✗ failed <reason>` box.
+- **Fatal box** (`format.fatalBox`) — printed to stderr when `TOKEN` is empty, immediately before `exit 1`.
+
+There is **no HTTP access log** — requests (401/404/200) are silent. See §9 if that becomes a debugging need.
 
 ---
 
 ## 4. HTTP API
 
-All routes return JSON. Everything except `/health` requires `Authorization: Bearer <AUTH_TOKEN>` — exact, timing-unsafe string compare against the env value. The token is a per-node JWT issued by the panel; the agent treats it as opaque.
+All routes return JSON. Everything except `/health` requires `Authorization: Bearer <TOKEN>` — exact, timing-unsafe string compare against the env value. The token is an opaque operator-set shared secret (not a JWT, nothing parses it). The agent refuses to start if `TOKEN` is empty, so there is no "open" code path: a missing token kills the process at boot rather than disabling auth.
 
-> **Status:** endpoints are implemented and respond to requests in dev. **Not validated** against the CRM's actual poller code or against a real Bearer JWT issued by the panel UI. The `aerio-crm` consumer ([repos/speedtest.ts](../aerio-crm/src/server/repos/speedtest.ts), [services/api/src/pollers/speedtest.ts](../aerio-crm/services/api/src/pollers/speedtest.ts)) expects the shapes below; deviation will break the integration silently.
+> **Status:** endpoints are implemented and respond to requests in dev (verified: boot banner, `/health`, 401 on missing/bad token, 404 before first run, clean SIGTERM). **Not validated** against the CRM's actual poller code. The `aerio-crm` consumer ([repos/speedtest.ts](../aerio-crm/src/server/repos/speedtest.ts), [services/api/src/pollers/speedtest.ts](../aerio-crm/services/api/src/pollers/speedtest.ts)) expects the shapes below; deviation will break the integration silently.
 
 ### `GET /health` (no auth)
 
-Liveness + scheduler state. The Docker HEALTHCHECK and the panel's "is this agent alive" probe both hit this.
+Liveness + scheduler state. The Docker HEALTHCHECK and a consumer's "is this agent alive" probe both hit this.
 
 ```json
 {
   "ok": true,
-  "serverId": "de-fra-1",
+  "node": { "ip": "104.28.193.219", "country": "Sweden", "countryCode": "SE", "region": "Stockholm County", "city": "Stockholm", "isp": "Cloudflare, Inc." },
   "hasHistory": true,
   "historyCount": 47,
   "lastRunAt": "2026-05-19T01:23:45.000Z",
@@ -183,7 +198,7 @@ Liveness + scheduler state. The Docker HEALTHCHECK and the panel's "is this agen
 }
 ```
 
-`lastRunAt` is `null` until the first scheduled run completes. `running` is `true` while a speedtest is in flight.
+`lastRunAt` is `null` until the first scheduled run completes. `running` is `true` while a speedtest is in flight. `node` is the IP/geo identity looked up once at boot via ip-api.com; if the lookup failed every field is `null` (plus an `error` string) — the agent still serves.
 
 ### `GET /speedtest/last` (Bearer)
 
@@ -191,17 +206,18 @@ Most-recent cached result. Returns `404 {"error": "no result yet"}` before the f
 
 ```json
 {
-  "serverId": "de-fra-1",
+  "node": { "ip": "104.28.193.219", "country": "Sweden", "countryCode": "SE", "region": "Stockholm County", "city": "Stockholm", "isp": "Cloudflare, Inc." },
   "startedAt": "2026-05-19T01:23:45.000Z",
   "finishedAt": "2026-05-19T01:23:58.000Z",
   "elapsedMs": 13002,
+  "meta": { "ip": "104.28.193.219", "colo": "ARN", "loc": "SE", "http": "http/1.1", "tls": "TLSv1.3", "asn": null, "asOrganization": null, "city": null, "country": "SE" },
   "latency": { "mean": 12.4, "median": 11.8, "p25": 10.2, "p75": 13.9, "min": 9.7, "max": 18.4, "jitter": 1.6 },
   "download": { "mean": 920.1, "median": 918.5, "p25": 905.0, "p75": 935.4, "min": 880.2, "max": 950.8 },
   "upload":   { "mean": 480.3, "median": 482.0, "p25": 470.0, "p75": 490.1, "min": 455.0, "max": 502.0 }
 }
 ```
 
-All bandwidth fields are megabits per second. Latency is milliseconds.
+All bandwidth fields are megabits per second. Latency is milliseconds. `node` is the IP/geo identity (ip-api.com, fixed for the process); `meta` is Cloudflare's per-run view of the connection (edge PoP `colo`, TLS/HTTP version, country code) — overlapping but distinct from `node`.
 
 ### `GET /speedtest/history?since=<epoch_ms>&limit=<N>` (Bearer)
 
@@ -212,7 +228,7 @@ Rolling history. Both query params are optional.
 
 ```json
 {
-  "serverId": "de-fra-1",
+  "node": { "ip": "104.28.193.219", "country": "Sweden", "countryCode": "SE", "region": "Stockholm County", "city": "Stockholm", "isp": "Cloudflare, Inc." },
   "count": 12,
   "rows": [ /* same shape as /speedtest/last, newest LAST */ ]
 }
@@ -263,7 +279,7 @@ Errors in `tick()` are caught and logged but never thrown — the loop must stay
 - Cloudflare rate-limit (rare with 30-min cadence) → propagates as an error, logged, next run after the regular interval
 - Speedtest timeout → upstream lib enforces its own timeout; we just see a rejected Promise
 
-History is unaffected by failed runs — only successful results land in the store.
+History is unaffected by failed runs — only successful results land in the store. Each tick (success or failure) prints a framed result box via `format.runBox` — see §3 Logging.
 
 ---
 
@@ -308,10 +324,11 @@ On boot, [storage.js:42–63](src/storage.js):
 
 All read from `process.env` in [src/index.js](src/index.js). The Dockerfile sets `PORT=9101` and `DATA_DIR=/data`; compose passes the rest through.
 
+There is **no `SERVER_ID`** — the node self-identifies by its public IP + location, looked up once at boot via `ip-api.com` (see [geo.js](src/geo.js)). If the lookup fails the node still runs; `node` reads as all-`null` with an `error` string. No env var controls this.
+
 | Variable | Default | Required | Purpose |
 |---|---|---|---|
-| `SERVER_ID` | `os.hostname()` | recommended | Stamped onto every result. **Must match the Remnawave node name** (e.g. `de-fra-1`) so the CRM can pair speedtest data with the right node card. |
-| `AUTH_TOKEN` | `""` | **required in prod** | Per-node JWT issued by the panel. Empty value triggers a `[warn]` log on boot AND **accepts all requests** — fine in dev, fatal in prod. |
+| `TOKEN` | `""` | **required** | Operator-set shared secret, checked on every non-`/health` request (`Authorization: Bearer <TOKEN>`). An empty value is **fatal**: the agent prints a framed error box and exits 1 rather than booting as an open API. |
 | `PORT` | `9101` | no | HTTP listen port. Sits in Prometheus exporter range. |
 | `BIND` | `0.0.0.0` | no | Listen address. |
 | `INTERVAL_MS` | `1800000` (30 min) | no | Scheduler cadence. Floor 60s enforced. |
@@ -384,13 +401,14 @@ What's NOT verified end-to-end as of 2026-05-19:
 | Item | Current state | What needs to happen |
 |---|---|---|
 | **Live deployment on a real VPN node** | Never deployed. Compose tested only on a dev workstation. | Pick one node (e.g. `de-fra-1`), drop the compose alongside its existing `remnawave-node` stack, run for 24h, verify `history.ndjson` accumulates rows and the panel can poll. |
-| **Panel-issued JWT validation** | `AUTH_TOKEN` is treated as opaque — any non-empty string is accepted. | Decide: keep opaque (simplest, panel owns token lifecycle) or validate JWT signature with the panel's public key. Document the choice here. |
+| **Token model** | **Resolved.** `TOKEN` is an opaque operator-set shared secret; empty is fatal at boot. No JWT parsing, no panel dependency. | Nothing — documented in §1/§4. If a future requirement needs signature validation, that's a new design. |
 | **CRM → agent integration tested** | CRM poller code exists in [aerio-crm/services/api/src/pollers/speedtest.ts](../aerio-crm/services/api/src/pollers/speedtest.ts); never run against this agent. | First-node deploy is the integration test. Watch for shape mismatches between `/speedtest/last` response and what the poller parses. |
-| **Token rotation flow** | Panel side (rotate UI + DB write) coded in `aerio-crm/src/server/actions/speedtest.ts`; agent side is a `docker compose up -d` restart with the new env. | Walk through one rotation end-to-end. Document any rough edges here. |
-| **Migration of token storage to web-api** | Planned per the [drop-direct-db spec](../aerio-crm/docs/superpowers/specs/2026-05-19-crm-drop-direct-db-design.md). | Once that ships, the panel UI changes but the agent contract stays the same. Update §1 to reflect the new owner. |
-| **TLS termination** | Compose binds to `0.0.0.0:9101` plain HTTP. The panel doc says "polls over HTTPS". | Either front the agent with Caddy on the node (recommended), or accept plain HTTP inside an internal network. Document the choice. |
+| **Token rotation flow** | Agent side is just an `.env` edit + `docker compose up -d` restart. Consumer must be updated with the same secret. | Walk through one rotation end-to-end. Document any rough edges here. |
+| **Migration of token storage to web-api** | Planned per the [drop-direct-db spec](../aerio-crm/docs/superpowers/specs/2026-05-19-crm-drop-direct-db-design.md). | Consumer-side only — the agent contract is unaffected. Update §1/§10 to reflect the new owner once it ships. |
+| **TLS termination** | Compose binds to `0.0.0.0:9101` plain HTTP. Consumers are expected to poll over HTTPS. | Either front the agent with Caddy on the node (recommended), or accept plain HTTP inside an internal network. Document the choice. |
 | **Cloudflare API drift** | Uses `speed.cloudflare.com` endpoints; no version pinning. | If Cloudflare changes the API, the speedtest run breaks silently (logged, but history just stops growing). Worth a synthetic alert from the panel side once we know what "normal cadence" looks like. |
-| **Tests** | None. | Decide if `vitest` or `node:test` is worth adding — given 639 LOC and the small surface, manual smoke after each behavioral change may be enough. |
+| **HTTP access log** | None — only the boot banner and per-run boxes are logged. Incoming requests (401/404/200) are silent. | When debugging the CRM integration, add a one-line request log in `server.js` (method, path, status, whether auth passed) so you can see whether the poller's calls arrive. |
+| **Tests** | None. | Decide if `vitest` or `node:test` is worth adding — given ~730 LOC and the small surface, manual smoke after each behavioral change may be enough. |
 | **Linter / formatter** | None. | Optional. Add or accept the current style. |
 | **Bandwidth dashboard** | The panel renders speedtest snapshots but there's no "agents are eating X GB/day total" view. | If a node operator complains about traffic bills, build this. |
 
@@ -406,7 +424,7 @@ This repo is a **leaf** in the Aerio architecture — it produces data, doesn't 
 |---|---|
 | [`aerio-crm`](../aerio-crm) | **Consumer** — its [services/api](../aerio-crm/services/api/) Fastify polls `/speedtest/last` on every registered node; its [src/server/actions/speedtest.ts](../aerio-crm/src/server/actions/speedtest.ts) handles `AUTH_TOKEN` rotation. Detail: [aerio-crm/CLAUDE.md §4](../aerio-crm/CLAUDE.md). |
 | [`aerio-v2`](../aerio-v2) | **Future owner of the token registry** — per drop-direct-db spec, `speedtest_tokens` table writes move from CRM to `aerio-v2/services/web-api`. Detail: [aerio-v2/CLAUDE.md §4](../aerio-v2/CLAUDE.md). |
-| Remnawave node | **Co-located** — same host, parallel container. No direct communication; the only shared point is the panel that knows them both by the same node name. |
+| Remnawave node | **Co-located** — same host, parallel container. No direct communication. Pairing is by public IP / geo (this agent self-reports it); a consumer correlates the two by host/IP rather than a shared name. |
 | `aerio-web` | No interaction. Customer cabinet never touches the speedtest layer. |
 | Cloudflare | **Upstream** — `speed.cloudflare.com` is where this agent measures against. No auth required for the speedtest endpoints; public. |
 

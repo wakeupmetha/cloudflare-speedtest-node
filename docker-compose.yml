@@ -5,8 +5,9 @@
 #
 #   docker compose up -d --build
 #
-# The aerio CRM panel pulls from this agent over HTTPS using the same
-# AUTH_TOKEN. Generate one with:  openssl rand -hex 24
+# The agent runs standalone — it just listens and serves results. Any
+# client that presents the TOKEN can poll it (the aerio CRM panel, a
+# curl probe, anything). Generate a token with:  openssl rand -hex 24
 #
 # Port: 9101. Sits in the Prometheus exporter range (9100 = node_exporter,
 # 9090 = Prometheus, etc) — same family as other host-level metrics
@@ -22,12 +23,12 @@ services:
     image: aerio/speedtest-agent:latest
     restart: unless-stopped
     environment:
-      # Per-node identity stamped onto every result. Use the same code
-      # the Remnawave panel knows the node by (e.g. "de-fra-1") so the
-      # CRM can pair speedtest data with the right node card.
-      SERVER_ID: ${SERVER_ID}
-      # Bearer token the CRM uses on every request. Required in prod.
-      AUTH_TOKEN: ${AUTH_TOKEN}
+      # No SERVER_ID — the node self-identifies by public IP + location
+      # (ip-api.com lookup at boot), stamped onto every result.
+      #
+      # Shared secret checked on every request (Authorization: Bearer).
+      # Required — the agent refuses to start if it's empty.
+      TOKEN: ${TOKEN}
       # 30 minutes — matches the panel's expected cadence.
       INTERVAL_MS: ${INTERVAL_MS:-1800000}
       # ±15 % spread so a fleet of agents that boot in the same window

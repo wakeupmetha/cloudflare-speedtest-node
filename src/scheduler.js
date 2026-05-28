@@ -14,6 +14,7 @@
 //     even if one run fails (transient network blip, dropped ssh, etc.).
 
 import { runSpeedtest } from './speedtest.js';
+import { runBox } from './format.js';
 
 const MIN_INTERVAL_MS = 60_000;          // safety floor: never run more than once a minute
 const DEFAULT_FIRST_DELAY_MS = 5_000;
@@ -25,21 +26,22 @@ export class SpeedtestScheduler {
    * @param {number} [opts.jitterPct]       0..1 — random offset added to interval. Default 0.15.
    * @param {number} [opts.firstDelayMs]    Delay before the very first run. Default 5 s.
    * @param {object} opts.speedtestOpts     Forwarded to runSpeedtest().
-   * @param {string} opts.serverId          Tag stamped onto every result.
+   * @param {object} opts.node               Node identity (ip/geo) stamped onto every result.
    * @param {import('./storage.js').HistoryStore} opts.store
    * @param {(msg: string, extra?: object) => void} [opts.log]
    */
-  constructor({ intervalMs, jitterPct = 0.15, firstDelayMs = DEFAULT_FIRST_DELAY_MS, speedtestOpts, serverId, store, log = console.log }) {
+  constructor({ intervalMs, jitterPct = 0.15, firstDelayMs = DEFAULT_FIRST_DELAY_MS, speedtestOpts, node, store, log = console.log }) {
     this.intervalMs = Math.max(MIN_INTERVAL_MS, intervalMs);
     this.jitterPct = Math.max(0, Math.min(1, jitterPct));
     this.firstDelayMs = firstDelayMs;
     this.speedtestOpts = speedtestOpts;
-    this.serverId = serverId;
+    this.node = node;
     this.store = store;
     this.log = log;
     this.timer = null;
     this.running = false;
     this.stopped = false;
+    this.runCount = 0;
     /** @type {Promise<object> | null} in-flight run shared with on-demand callers */
     this.inflight = null;
     /** ISO timestamp of when the next run is scheduled, for /health */
@@ -69,7 +71,7 @@ export class SpeedtestScheduler {
       this.running = true;
       try {
         const result = await runSpeedtest(this.speedtestOpts);
-        const stamped = { serverId: this.serverId, ...result };
+        const stamped = { node: this.node, ...result };
         await this.store.append(stamped);
         return stamped;
       } finally {
@@ -94,11 +96,12 @@ export class SpeedtestScheduler {
 
   async tick() {
     const start = Date.now();
+    const n = ++this.runCount;
     try {
       const r = await this.runOnce();
-      this.log(`speedtest done in ${Date.now() - start}ms — dl ${r.download?.median ?? '?'} mbps · ul ${r.upload?.median ?? '?'} mbps · lat ${r.latency?.median ?? '?'} ms`);
+      this.log(runBox({ n, elapsedMs: Date.now() - start, result: r }));
     } catch (e) {
-      this.log(`speedtest failed after ${Date.now() - start}ms: ${e?.message || e}`);
+      this.log(runBox({ n, elapsedMs: Date.now() - start, error: e?.message || String(e) }));
     } finally {
       this.scheduleNext();
     }

@@ -2,27 +2,35 @@
 
 Lightweight Node.js daemon that runs Cloudflare speedtests on a fixed
 schedule, persists the rolling history locally, and exposes it over a
-small token-gated HTTP API. Designed to sit on every aerio VPN node
-alongside `xray` / `remnawave-node` and be polled by the aerio CRM.
+small token-gated HTTP API. Standalone — it sits on a VPN node alongside
+`xray` / `remnawave-node` and serves results to whoever polls it (the
+aerio CRM panel is one such consumer, but the agent needs no panel to
+run).
 
 No third-party dependencies. Single Docker image, one persistent volume
-for history.
+for history. Clone, set `PORT` + `TOKEN` in `.env`, start — it runs on
+its own.
 
 ## How it works
 
 1. On boot, `src/index.js` loads `data/history.ndjson` into a ring
-   buffer and starts a background scheduler.
+   buffer, looks up the node's public IP + location once via ip-api.com
+   (this is its identity — no manual `SERVER_ID`), and starts a
+   background scheduler. The IP and city/country are printed in the
+   startup banner.
 2. The scheduler runs a Cloudflare speedtest every `INTERVAL_MS`
-   (default 30 min) with ±15 % jitter, appends each result to the
-   ndjson file, and trims the ring to `MAX_HISTORY` rows.
-3. The CRM panel pulls fresh data over HTTPS using the per-node
-   `AUTH_TOKEN`. The agent never initiates outbound traffic to the CRM
-   — it only talks to `speed.cloudflare.com`.
+   (default 30 min) with ±15 % jitter, stamps the node identity onto
+   each result, appends it to the ndjson file, and trims the ring to
+   `MAX_HISTORY` rows.
+3. Any consumer pulls fresh data over HTTP using the node's `TOKEN`.
+   The agent only makes outbound calls to `speed.cloudflare.com` (and
+   ip-api.com once at boot) — it never initiates traffic to a consumer,
+   it just waits to be polled.
 
 ## Endpoints
 
 All routes return JSON. Everything except `/health` requires
-`Authorization: Bearer <AUTH_TOKEN>`.
+`Authorization: Bearer <TOKEN>`.
 
 | Route                     | Method | Notes                                                  |
 | ------------------------- | ------ | ------------------------------------------------------ |
@@ -35,29 +43,29 @@ All routes return JSON. Everything except `/health` requires
 
 ```bash
 cp .env.example .env
-# edit .env: set SERVER_ID (must match the Remnawave node name).
-# Generate AUTH_TOKEN inside the aerio CRM:
-#   /nodes → click the key icon on this node's card → Generate.
-# Paste the displayed JWT into AUTH_TOKEN here.
+# edit .env:
+#   TOKEN — your own shared secret:  openssl rand -hex 24
+# (the node self-identifies by public IP + location — nothing else to set)
 docker compose up -d --build
 
 # probe from the host
 curl http://localhost:9101/health
-curl -H "Authorization: Bearer $AUTH_TOKEN" http://localhost:9101/speedtest/last
+curl -H "Authorization: Bearer $TOKEN" http://localhost:9101/speedtest/last
 ```
+
+The agent refuses to start if `TOKEN` is empty, so it can't accidentally
+come up as an open API on a public port.
 
 ## Token rotation
 
-The CRM owns the token lifecycle:
+The token is just a shared secret in this node's `.env`. To rotate:
 
-1. Open `/nodes` in the panel, find the card for this node.
-2. Click the key icon → "Rotate".
-3. Copy the new JWT (shown once), paste into this node's `AUTH_TOKEN`,
-   `docker compose up -d` to restart.
+1. Generate a new value (`openssl rand -hex 24`) and update `TOKEN`.
+2. `docker compose up -d` to restart with it.
+3. Update the same value in whatever consumer polls this node.
 
-Until step 3 lands the agent will reject panel polls (401), and the
-card shows the stale-data badge. Skipping the rotation entirely is
-fine — old tokens never expire on the agent side.
+Until step 3 lands, that consumer will get 401s. Tokens never expire on
+the agent side — rotate only when you want to.
 
 ## Bandwidth budget
 
@@ -73,8 +81,7 @@ See `.env.example` for the full list. The most common knobs:
 
 | Var           | Default | Meaning                              |
 | ------------- | ------- | ------------------------------------ |
-| `SERVER_ID`   | hostname | Stamped onto every result.           |
-| `AUTH_TOKEN`  | (empty) | Bearer token. **Required in prod.**  |
+| `TOKEN`       | (empty) | Shared bearer secret. **Required — agent won't start without it.** |
 | `INTERVAL_MS` | 1800000 | Scheduler cadence (30 min).          |
 | `JITTER_PCT`  | 0.15    | ±N % spread on each interval.        |
 | `PORT`        | 9101    | Listening port (Prometheus exporter range, next to node_exporter on 9100). |
@@ -85,5 +92,5 @@ See `.env.example` for the full list. The most common knobs:
 
 ```bash
 npm install   # writes lockfile if missing; no deps to install
-AUTH_TOKEN=devtok SERVER_ID=local INTERVAL_MS=120000 npm start
+TOKEN=devtok INTERVAL_MS=120000 npm start
 ```

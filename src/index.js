@@ -1,7 +1,8 @@
-import { hostname } from 'node:os';
 import { createAgent } from './server.js';
 import { HistoryStore, defaultDataFile } from './storage.js';
 import { SpeedtestScheduler } from './scheduler.js';
+import { bootBanner, fatalBox } from './format.js';
+import { fetchGeo } from './geo.js';
 
 // 9101 = Prometheus exporter convention (adjacent to node_exporter on
 // 9100). The speedtest agent is functionally a host-level metrics
@@ -10,8 +11,7 @@ import { SpeedtestScheduler } from './scheduler.js';
 // docker-compose.
 const port = Number(process.env.PORT ?? 9101);
 const bind = process.env.BIND ?? '0.0.0.0';
-const authToken = process.env.AUTH_TOKEN ?? '';
-const serverId = process.env.SERVER_ID || hostname();
+const token = process.env.TOKEN ?? '';
 
 // Cadence — defaults to 30 min, matches what the CRM panel expects.
 // Floor enforced by the scheduler at 60 s so a misconfigured env can't
@@ -34,27 +34,44 @@ const speedtestOpts = {
 const dataFile = process.env.DATA_FILE || defaultDataFile();
 const maxEntries = Number(process.env.MAX_HISTORY ?? 1500);
 
-if (!authToken) {
-  console.warn('[warn] AUTH_TOKEN is not set — agent will accept unauthenticated requests');
+// The agent is a standalone daemon listening on an external port — a
+// missing token would mean an open API to anyone who can reach it.
+// Fail fast rather than silently booting unauthenticated.
+if (!token) {
+  console.error(fatalBox([
+    '  ✗ TOKEN is not set — refusing to start.',
+    '    set TOKEN in .env   (openssl rand -hex 24)',
+  ]));
+  process.exit(1);
 }
 
 const store = new HistoryStore({ file: dataFile, maxEntries });
 await store.init();
+
+// Self-identify by public IP + location instead of a manual SERVER_ID.
+// Best-effort, once per process — the node runs even if this fails.
+const node = await fetchGeo();
 
 const scheduler = new SpeedtestScheduler({
   intervalMs,
   jitterPct,
   firstDelayMs,
   speedtestOpts,
-  serverId,
+  node,
   store,
-  log: (msg) => console.log(`[scheduler] ${msg}`),
 });
 
-const agent = createAgent({ port, bind, authToken, scheduler, store, serverId });
+const agent = createAgent({ port, bind, token, scheduler, store, node });
 
 await agent.listen();
-console.log(`speedtest agent listening on http://${bind}:${port} (serverId=${serverId}, history=${store.entries.length} rows, interval=${Math.round(intervalMs / 1000)}s)`);
+console.log(bootBanner({
+  node,
+  bind,
+  port,
+  intervalMs: scheduler.intervalMs,
+  jitterPct: scheduler.jitterPct,
+  historyCount: store.entries.length,
+}));
 
 scheduler.start();
 

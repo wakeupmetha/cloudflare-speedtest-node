@@ -11,15 +11,16 @@ import { createServer } from 'node:http';
 //                                 a scheduled run is in flight)
 //
 // Everything except /health requires `Authorization: Bearer <token>`.
-// The token also doubles as the node's identity when the CRM panel
-// pulls from many agents — there's exactly one valid token per agent
-// and it's set via env at deploy time.
+// The token is a shared secret set by the operator in the env at deploy
+// time — one valid token per agent. Any client that presents it (the
+// aerio CRM panel, a curl probe, any third-party poller) gets the data;
+// the agent doesn't care who's asking.
 //
-// Why not POST anywhere: the agent is read-only from the panel's
-// perspective. The only side effect /speedtest can trigger is "run
-// now"; we keep it on GET to make ad-hoc curl probes simple.
+// Why not POST anywhere: the agent is read-only to its callers. The only
+// side effect /speedtest can trigger is "run now"; we keep it on GET to
+// make ad-hoc curl probes simple.
 
-export function createAgent({ port, bind, authToken, scheduler, store, serverId }) {
+export function createAgent({ port, bind, token, scheduler, store, node }) {
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://localhost');
@@ -28,7 +29,7 @@ export function createAgent({ port, bind, authToken, scheduler, store, serverId 
         const last = store.last();
         return send(res, 200, {
           ok: true,
-          serverId,
+          node,
           hasHistory: store.entries.length > 0,
           historyCount: store.entries.length,
           lastRunAt: last?.startedAt ?? null,
@@ -37,7 +38,7 @@ export function createAgent({ port, bind, authToken, scheduler, store, serverId 
         });
       }
 
-      if (!checkAuth(req, authToken)) {
+      if (!checkAuth(req, token)) {
         return send(res, 401, { error: 'unauthorized' });
       }
 
@@ -52,7 +53,7 @@ export function createAgent({ port, bind, authToken, scheduler, store, serverId 
         const limit = parseIntParam(url.searchParams.get('limit'));
         const rows = store.query({ since, limit });
         return send(res, 200, {
-          serverId,
+          node,
           count: rows.length,
           rows,
         });
@@ -80,7 +81,6 @@ export function createAgent({ port, bind, authToken, scheduler, store, serverId 
 }
 
 function checkAuth(req, token) {
-  if (!token) return true;
   const h = req.headers['authorization'];
   return typeof h === 'string' && h === `Bearer ${token}`;
 }

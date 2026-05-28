@@ -1,15 +1,14 @@
 # syntax=docker/dockerfile:1.6
 #
 # Cloudflare speedtest agent — single-process Node.js daemon.
-# Runs an HTTP API gated by AUTH_TOKEN and a background scheduler that
-# pings speed.cloudflare.com every INTERVAL_MS, persisting results to
-# /data/history.ndjson. Designed to sit on every VPN node alongside
-# xray/remnawave-node and be polled by the aerio CRM panel.
+# Runs an HTTP API gated by a shared TOKEN and a background scheduler
+# that pings speed.cloudflare.com every INTERVAL_MS, persisting results
+# to /data/history.ndjson. Standalone — sits on a VPN node alongside
+# xray/remnawave-node and serves results to whoever polls it.
 #
 # Build:   docker build -t aerio/speedtest-agent:latest .
 # Run:     docker run --rm -p 9101:9101 \
-#            -e AUTH_TOKEN=$(openssl rand -hex 24) \
-#            -e SERVER_ID=de-fra-1 \
+#            -e TOKEN=$(openssl rand -hex 24) \
 #            -v speedtest-data:/data \
 #            aerio/speedtest-agent:latest
 

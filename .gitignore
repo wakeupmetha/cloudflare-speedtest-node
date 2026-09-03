@@ -20,3 +20,6 @@ Thumbs.db
 
 # Claude Code per-session worktrees — ephemeral, per-user, never commit.
 .claude/worktrees/
+
+# Per-developer Claude Code permission allow-list — never shared
+.claude/settings.local.json

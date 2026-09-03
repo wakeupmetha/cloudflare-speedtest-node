@@ -13,8 +13,10 @@ grades.
 ## Install (from the panel)
 
 On the panel's `/nodes` page, click the key icon on a node → **Generate
-token**. The dialog shows the command with the panel URL and the token
-filled in:
+token**. The dialog prints a ready command with the panel URL and the token
+already in it, in two flavours — pick whichever the node runs.
+
+**Docker:**
 
 ```bash
 docker run -d --name aerio-agent --restart unless-stopped \
@@ -22,19 +24,47 @@ docker run -d --name aerio-agent --restart unless-stopped \
   -v aerio-agent-data:/data ghcr.io/wakeupmetha/cloudflare-speedtest-node:latest
 ```
 
-Then watch it pair:
+**systemd, no Docker:**
 
 ```bash
-docker logs -f aerio-agent
+curl -sL https://raw.githubusercontent.com/wakeupmetha/cloudflare-speedtest-node/main/install.sh -o /tmp/aerio-agent-install.sh \
+  && chmod +x /tmp/aerio-agent-install.sh \
+  && sudo /tmp/aerio-agent-install.sh -t "<token>" -url "https://console.aerio.my"
+```
+
+[install.sh](install.sh) puts the agent under `/opt/aerio-agent` as a
+systemd unit running under its own system user. Node is **not** a
+prerequisite: if the host has nothing newer than 20 the script fetches the
+official tarball into the prefix and leaves the system Node alone.
+`geocheck` comes from its own releases. Both downloads are checksum-verified,
+and the token is written to a root-only `0600` env file rather than into the
+unit, which `systemctl cat` shows to anyone.
+
+Then watch it pair, either way:
+
+```bash
+docker logs -f aerio-agent        # or: journalctl -u aerio-agent -f
 # 12:00:02  INFO   panel       paired as "de-fra-1"  url=https://console.aerio.my rtt=84
 ```
 
 The agent connects **out** to the panel. No port to open, no TLS on the
-node, no firewall rule. The card on `/nodes` shows the node within 30 s.
+node, no firewall rule, and nothing to register on the panel side — the
+token is the addressing. The card on `/nodes` fills in within 30 s.
 
-The image is built by CI on every push to `main` (`latest`) and on `v*`
-tags. The GHCR package must be **public** for the line above to work
-without `docker login ghcr.io`.
+Both paths need this repository to be **public**: the Docker one pulls from
+GHCR, the systemd one curls the script and the source from GitHub. A private
+repo makes the first need `docker login ghcr.io` and the second fail outright.
+
+### Upgrading, rotating, removing
+
+Re-run the same install command with the new token — both paths replace the
+agent in place and keep the measurement history (`aerio-agent-data` volume,
+or `/opt/aerio-agent/data`). To remove the systemd install:
+`sudo /tmp/aerio-agent-install.sh --uninstall` (add `--purge` to drop the
+data too); for Docker, `docker rm -f aerio-agent`.
+
+`install.sh --help` lists the rest: `--interval`, `--geocheck-interval`,
+`--no-geocheck`, and the `NODE_VERSION` / `PREFIX` env overrides.
 
 ### With compose
 
@@ -49,7 +79,7 @@ in `.env.example` works from there. No image on GHCR, or want your own
 build? `docker compose build` builds the same tag locally, and
 `docker compose up -d` builds automatically when the image is missing.
 
-### Without Docker
+### From a checkout (development, or a host `install.sh` does not cover)
 
 Node ≥ 20 and, for the service checks, the `geocheck` binary on `PATH`
 (`go install github.com/remnawave/geocheck/cmd/geocheck@latest`, or a release
@@ -60,7 +90,9 @@ PANEL_URL=https://console.aerio.my TOKEN=<token> node src/index.js
 ```
 
 History and the last geocheck digest are written to `./data/` relative to
-the current directory; set `DATA_DIR` to move them.
+the current directory; set `DATA_DIR` to move them. This is the path for
+macOS and for anything without systemd — `install.sh` refuses to run there
+rather than half-installing.
 
 ## What the panel receives
 
@@ -141,10 +173,11 @@ The ones that matter:
 
 Rotate on `/nodes`; the dialog shows a new install command.
 
-- Installed with `docker run`: `docker rm -f aerio-agent`, then paste the
-  new command. The `aerio-agent-data` volume keeps history and the last
-  geocheck result.
-- With compose: update `TOKEN` in `.env`, `docker compose up -d`.
+- **systemd**: re-run the new command as-is — it rewrites the env file and
+  restarts the unit.
+- **`docker run`**: `docker rm -f aerio-agent`, then paste the new command.
+  The `aerio-agent-data` volume keeps history and the last geocheck result.
+- **compose**: update `TOKEN` in `.env`, `docker compose up -d`.
 
 Until the agent restarts with the new value it logs `token rejected` every
 10 minutes and keeps measuring.

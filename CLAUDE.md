@@ -18,7 +18,7 @@ There are no separate spec files in this repo. The cross-repo design that produc
 - Changing a scheduler's cadence, floor, jitter or in-flight rule → §5
 - Changing the storage format, compaction, or the geocheck digest file → §6
 - Adding/changing an env var → §7
-- Changing the Dockerfile, compose, workflow or healthcheck → §8
+- Changing the Dockerfile, compose, `install.sh`, the workflow or the healthcheck → §8
 - Changing a log line an operator is told to grep for → §9
 - Changing how a number is measured → §10 (and say which upstream behaviour it now matches or departs from)
 - A "not yet" in §11 becomes "done" → move it into the section that owns it
@@ -40,6 +40,7 @@ The same protocol applies in `aerio-crm`; the heartbeat contract is documented o
 | Language | Node.js ≥ 20, ES modules, **no third-party dependencies** (`node:*` only) |
 | Source | ~1 650 LOC in [src/](src/), 15 modules; tests in [test/](test/) (`node --test`, no framework) |
 | Image | `ghcr.io/wakeupmetha/cloudflare-speedtest-node:latest` (multi-arch, built by [.github/workflows/docker.yml](.github/workflows/docker.yml)); bundles the `geocheck` binary copied from `remnawave/geocheck` |
+| Install | Two commands, both printed by the panel with the token in them: `docker run …`, or [install.sh](install.sh) for a systemd unit under `/opt/aerio-agent`. Both need this repo **public** (§11). |
 | Local port | **9101**, **loopback only** by default — the panel never reads it |
 | Storage | `/data/history.ndjson` (ring, 1500 rows ≈ 31 days) + `/data/geocheck.json` (last digest) |
 | Outbound traffic | `speed.cloudflare.com` (each run), `ip-api.com` (once at boot), `PANEL_URL` (every 30 s), the ~40 hosts geocheck probes (every 6 h) |
@@ -105,6 +106,7 @@ curl -s -H "Authorization: Bearer devtok" localhost:9101/speedtest/last
 | `log.js` | Line logger — port of aerio-crm `src/server/log.ts` |
 | `format.js` | Boot banner + per-run result box (the two framed outputs) |
 | `version.js` | `VERSION` from package.json |
+| `install.sh` | Not part of the running agent: the systemd installer the panel hands out (§8) |
 
 ---
 
@@ -230,6 +232,46 @@ Bandwidth: ~50–250 MB per speedtest run at the defaults ⇒ ~2–12 GB/day/nod
 
 - [Dockerfile](Dockerfile): `FROM ${GEOCHECK_IMAGE:-remnawave/geocheck:latest} AS geocheck` → `node:20-alpine`, copies `/usr/local/bin/geocheck`, `USER node`, `BIND=127.0.0.1`, no `npm install` layer (zero deps). Healthcheck `wget /health` every 30 s.
 - [docker-compose.yml](docker-compose.yml): one service `agent` (container `aerio-agent`), image from GHCR with `build: .` for local builds, `env_file: .env` (so every knob in `.env.example` reaches the container; the `environment:` block only carries defaults), **no `ports:`**, named volume `agent-data:/data`.
+### `install.sh` — the no-Docker path
+
+The panel's dialog offers a second install line, shaped like Beszel's, with
+the same two values in it (`-t <token>`, `-url <panel>`):
+
+```bash
+curl -sL https://raw.githubusercontent.com/wakeupmetha/cloudflare-speedtest-node/main/install.sh -o /tmp/aerio-agent-install.sh \
+  && chmod +x /tmp/aerio-agent-install.sh \
+  && sudo /tmp/aerio-agent-install.sh -t "<token>" -url "https://console.aerio.my"
+```
+
+What it does, in order: validate the token/URL, refuse anything that is not
+Linux+systemd or not root, pick the arch, **reuse the host's node when it is
+≥ 20** and otherwise download the pinned official tarball into
+`$PREFIX/node` (checksum-verified against `SHASUMS256.txt`), fetch the agent
+source from the repo archive, fetch `geocheck` from its own releases
+(checksum-verified against `checksums.txt`), create the `aerio-agent` system
+user, write `/etc/aerio-agent.env` at `0600 root:root`, write the unit, and
+`enable --now`.
+
+- **The token is in the env file, not the unit.** `systemctl cat` and
+  `systemd-analyze` print the unit to any user; `EnvironmentFile` is read by
+  systemd itself before privileges are dropped, so `0600 root:root` is both
+  safe and sufficient.
+- **The unit is hardened** — `NoNewPrivileges`, `PrivateTmp`,
+  `ProtectSystem=strict`, `ProtectHome`, and `ReadWritePaths=$PREFIX/data`,
+  which is the only path the agent writes.
+- **Re-running is the upgrade and the rotation.** It replaces `app/`,
+  rewrites the env file and restarts; `data/` is untouched.
+- **`--uninstall`** stops and removes the unit, the env file and the code,
+  keeping `data/` unless `--purge`. Flags: `--interval`, `--geocheck-interval`,
+  `--no-geocheck`; env overrides `NODE_VERSION` (pinned, one line to bump),
+  `PREFIX`, `AERIO_AGENT_REPO`, `AERIO_AGENT_REF`.
+- It warns when a Docker `aerio-agent` is already running on the host: two
+  agents sharing one token both report as the same node.
+
+Validated on macOS only — every argument and error path, plus a live
+download+checksum+extract of the real `geocheck_linux_amd64` asset. The
+systemd half has never run (§11).
+
 - [.github/workflows/docker.yml](.github/workflows/docker.yml): `npm test` on every push/PR (also `workflow_dispatch`); on `main` and `v*` tags builds `linux/amd64,linux/arm64` and pushes `ghcr.io/wakeupmetha/cloudflare-speedtest-node:{latest, X.Y.Z, X.Y}` — no per-commit tags, the `revision` label carries the sha. First run on 2026-09-03 (run 33735983736) was green; the package is created **private** by GitHub's default and must be flipped to public once in the package settings, or every node needs `docker login ghcr.io`.
 - The install line the panel shows (needs the image published — first push to `main` does that):
 
@@ -293,7 +335,9 @@ Read from the upstream's `src/engine/*.rs`, `metrics.rs`, `quality.rs`, `constan
 |---|---|
 | **Run on a real VPN node** | Not yet. First deploy = pick one node, run the install line, watch `paired as`, leave it a day, then clear the §top banner. |
 | **Published image** | Published 2026-09-03 (`latest` = `0b75260`, amd64 + arm64). **Still private** until the package visibility is switched to public in GitHub — until then the install line needs `docker login ghcr.io` first. |
-| **Single-binary distribution** | Not planned: Node app; Docker is the install, `node src/index.js` the bare path. |
+| **Repository is private** | **Blocks both install paths.** The Docker line pulls from GHCR (package private too) and the systemd line curls `install.sh` plus the source archive from GitHub — anonymously, both 404. Make the repo and the GHCR package public, or neither command works as printed. |
+| **`install.sh` on a real host** | Never run end to end: no Linux box and no Docker daemon here. Arg parsing, every error path and the geocheck download+checksum+extract are verified; the Node download, the systemd unit, the service user and `--uninstall` are not. |
+| **Single-binary distribution** | Not planned, and no longer needed: `install.sh` gives the Beszel-style one-liner without one, fetching a runtime when the host lacks it. A true SEA build would only remove the nodejs.org dependency, at the cost of a per-arch release pipeline. |
 | **History in the panel** | Not planned: the panel has no durable store; history stays on the agent (`/speedtest/history`, ndjson). |
 | **geocheck path analysis / tunnel detection** | Deliberately off (`--no-mtr --no-detect`): needs NET_RAW, takes minutes, different question. `GEOCHECK_ARGS` can turn it on; the digest ignores those sections. |
 | **UDP loss probe** (upstream TURN) | Not ported. |

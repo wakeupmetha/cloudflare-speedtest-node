@@ -1,88 +1,107 @@
-import { createServer } from 'node:http';
-
-// HTTP surface of the agent. The scheduler owns the run loop and the
-// history store — this module only exposes them over a small REST API
-// gated by a per-node bearer token.
+// Local HTTP surface of the agent — for the docker healthcheck and for a
+// person with a shell on the node. The panel does NOT read this: results
+// travel outbound in the heartbeat (panel.js). It binds to 127.0.0.1 by
+// default; set BIND=0.0.0.0 to expose it.
 //
-//   GET /health                   liveness, no auth
+//   GET /health                   liveness + scheduler + pairing state, no auth
 //   GET /speedtest/last           last cached result
 //   GET /speedtest/history        rolling history (?since=ms&limit=N)
-//   GET /speedtest                force a fresh run (returns cached if
-//                                 a scheduled run is in flight)
+//   GET /speedtest                force a fresh run (shares an in-flight one)
+//   GET /geocheck/last            last geocheck digest
+//   GET /geocheck                 force a geocheck run
 //
-// Everything except /health requires `Authorization: Bearer <token>`.
-// The token is a shared secret set by the operator in the env at deploy
-// time — one valid token per agent. Any client that presents it (the
-// aerio CRM panel, a curl probe, any third-party poller) gets the data;
-// the agent doesn't care who's asking.
-//
-// Why not POST anywhere: the agent is read-only to its callers. The only
-// side effect /speedtest can trigger is "run now"; we keep it on GET to
-// make ad-hoc curl probes simple.
+// Everything except /health requires `Authorization: Bearer <TOKEN>`.
+// One access-log line per request; /health 2xx is silent (the healthcheck
+// probes it every 30 s).
 
-export function createAgent({ port, bind, token, scheduler, store, node }) {
+import { createServer } from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
+
+export function createAgent({ port, bind, token, log, store, speedtest, geocheck, panel, node, version }) {
   const server = createServer(async (req, res) => {
-    try {
-      const url = new URL(req.url, 'http://localhost');
+    const t0 = Date.now();
+    const url = new URL(req.url, 'http://localhost');
+    let auth = 'n/a';
+    const done = (status, body) => {
+      send(res, status, body);
+      if (url.pathname === '/health' && status < 300) return;
+      const level = status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info';
+      log[level](`${req.method} ${url.pathname} ${status}`, { ms: Date.now() - t0, auth });
+    };
 
+    try {
       if (req.method === 'GET' && url.pathname === '/health') {
         const last = store.last();
-        return send(res, 200, {
+        return done(200, {
           ok: true,
+          version,
           node,
           hasHistory: store.entries.length > 0,
           historyCount: store.entries.length,
           lastRunAt: last?.startedAt ?? null,
-          nextRunAt: scheduler.nextRunAt,
-          running: scheduler.running,
+          nextRunAt: speedtest.nextRunAt,
+          running: speedtest.running,
+          panel: panel ? panel.status() : null,
+          geocheck: geocheck
+            ? { enabled: true, lastRunAt: geocheck.scheduler.lastRunAt, nextRunAt: geocheck.scheduler.nextRunAt, running: geocheck.scheduler.running, hasResult: !!geocheck.last() }
+            : { enabled: false },
         });
       }
 
-      if (!checkAuth(req, token)) {
-        return send(res, 401, { error: 'unauthorized' });
-      }
+      auth = checkAuth(req, token) ? 'ok' : 'bad';
+      if (auth === 'bad') return done(401, { error: 'unauthorized' });
 
       if (req.method === 'GET' && url.pathname === '/speedtest/last') {
         const last = store.last();
-        if (!last) return send(res, 404, { error: 'no result yet' });
-        return send(res, 200, last);
+        if (!last) return done(404, { error: 'no result yet' });
+        return done(200, { node, ...last });
       }
 
       if (req.method === 'GET' && url.pathname === '/speedtest/history') {
         const since = parseIntParam(url.searchParams.get('since'));
         const limit = parseIntParam(url.searchParams.get('limit'));
         const rows = store.query({ since, limit });
-        return send(res, 200, {
-          node,
-          count: rows.length,
-          rows,
-        });
+        return done(200, { node, count: rows.length, rows });
       }
 
       if (req.method === 'GET' && url.pathname === '/speedtest') {
-        // On-demand run. Shares the in-flight promise with the scheduler
-        // so concurrent callers don't kick off a second speedtest. The
-        // caller waits for the actual result rather than returning the
-        // cached one — they explicitly asked for a fresh measurement.
-        const result = await scheduler.runOnce();
-        return send(res, 200, result);
+        const result = await speedtest.runOnce();
+        return done(200, { node, ...result });
       }
 
-      send(res, 404, { error: 'not found' });
+      if (req.method === 'GET' && url.pathname === '/geocheck/last') {
+        if (!geocheck) return done(404, { error: 'geocheck disabled on this agent' });
+        const last = geocheck.last();
+        if (!last) return done(404, { error: 'no result yet' });
+        return done(200, last);
+      }
+
+      if (req.method === 'GET' && url.pathname === '/geocheck') {
+        if (!geocheck) return done(404, { error: 'geocheck disabled on this agent' });
+        return done(200, await geocheck.scheduler.runOnce());
+      }
+
+      done(404, { error: 'not found' });
     } catch (err) {
-      send(res, 500, { error: String(err?.message || err) });
+      done(500, { error: String(err?.message || err) });
     }
   });
 
   return {
-    listen: () => new Promise((resolve) => server.listen(port, bind, resolve)),
+    listen: () => new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(port, bind, () => { server.off('error', reject); resolve(); });
+    }),
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }
 
 function checkAuth(req, token) {
   const h = req.headers['authorization'];
-  return typeof h === 'string' && h === `Bearer ${token}`;
+  if (typeof h !== 'string') return false;
+  const a = Buffer.from(h);
+  const b = Buffer.from(`Bearer ${token}`);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 function parseIntParam(v) {

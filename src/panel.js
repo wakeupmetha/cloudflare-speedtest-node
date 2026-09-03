@@ -23,6 +23,7 @@ export function createPanelClient({
   onCommand,
   fetchImpl = fetch,
   timeoutMs = 10_000,
+  heartbeatMs: heartbeatMsHint = 30_000,
   now = Date.now,
 }) {
   const endpoint = new URL('/api/agent/heartbeat', url).toString();
@@ -106,8 +107,12 @@ export function createPanelClient({
         Promise.resolve().then(() => onCommand(cmd)).catch((e) => log.warn('command failed', { cmd, err: e }));
       }
     } catch (e) {
-      const msg = e?.name === 'AbortError' ? `timed out after ${Math.round(timeoutMs / 1000)}s` : (e?.message || String(e));
-      fail('unreachable', 'unreachable', { err: msg });
+      // undici wraps the socket error: "fetch failed" with cause.code
+      // ECONNREFUSED / ENOTFOUND / CERT_HAS_EXPIRED — the part worth reading.
+      const msg = e?.name === 'AbortError'
+        ? `timed out after ${Math.round(timeoutMs / 1000)}s`
+        : [e?.message || String(e), e?.cause?.code].filter(Boolean).join(': ');
+      fail('unreachable', 'unreachable', { err: msg, next: `${Math.round(heartbeatMsHint / 1000)}s` });
     } finally {
       inflight = false;
     }

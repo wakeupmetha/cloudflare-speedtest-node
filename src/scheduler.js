@@ -1,55 +1,51 @@
-// Background scheduler that runs the speedtest on a fixed interval and
-// pushes each result into the history store. Self-rescheduling via
-// setTimeout (not setInterval) so a slow run never overlaps the next
-// tick — we only schedule the follow-up once the current call resolves.
+// Jittered run loop, used twice: once for the speedtest, once for geocheck.
 //
-// Behaviour:
-//   - First run fires after `firstDelayMs` (default ~5 s). Lets the
-//     container settle and the network come up before hammering it.
-//   - Each subsequent run is `intervalMs ± jitterPct%`. Without jitter
-//     a fleet of agents that all start in the same compose-up would
-//     fire in lock-step every 30 min and create an unnecessary spike on
-//     the upstream Cloudflare edge.
-//   - Errors are logged but never thrown — the loop must stay alive
-//     even if one run fails (transient network blip, dropped ssh, etc.).
+//   - setTimeout, not setInterval: the follow-up is scheduled only after the
+//     current run resolves, so a slow run never overlaps the next tick.
+//   - interval ± jitterPct so a fleet booted by the same compose-up does not
+//     hit the upstream in lock-step.
+//   - runOnce() shares the in-flight promise: a tick, an on-demand HTTP call
+//     and a panel command that coincide all get the same run.
+//   - onDone / onError are the caller's hooks (store, log, heartbeat); their
+//     own failures are logged here and never break the loop.
+//   - intervalMs === 0 disables the loop; runOnce() still works.
 
-import { runSpeedtest } from './speedtest.js';
-import { runBox } from './format.js';
+import { logger } from './log.js';
 
-const MIN_INTERVAL_MS = 60_000;          // safety floor: never run more than once a minute
-const DEFAULT_FIRST_DELAY_MS = 5_000;
-
-export class SpeedtestScheduler {
-  /**
-   * @param {object} opts
-   * @param {number} opts.intervalMs        Cadence between runs.
-   * @param {number} [opts.jitterPct]       0..1 — random offset added to interval. Default 0.15.
-   * @param {number} [opts.firstDelayMs]    Delay before the very first run. Default 5 s.
-   * @param {object} opts.speedtestOpts     Forwarded to runSpeedtest().
-   * @param {object} opts.node               Node identity (ip/geo) stamped onto every result.
-   * @param {import('./storage.js').HistoryStore} opts.store
-   * @param {(msg: string, extra?: object) => void} [opts.log]
-   */
-  constructor({ intervalMs, jitterPct = 0.15, firstDelayMs = DEFAULT_FIRST_DELAY_MS, speedtestOpts, node, store, log = console.log }) {
-    this.intervalMs = Math.max(MIN_INTERVAL_MS, intervalMs);
+export class Scheduler {
+  constructor({
+    name,
+    intervalMs,
+    minIntervalMs = 60_000,
+    jitterPct = 0.15,
+    firstDelayMs = 5_000,
+    run,
+    onDone = () => {},
+    onError = () => {},
+  }) {
+    this.name = name;
+    this.log = logger(name);
+    this.intervalMs = intervalMs === 0 ? 0 : Math.max(minIntervalMs, intervalMs);
     this.jitterPct = Math.max(0, Math.min(1, jitterPct));
     this.firstDelayMs = firstDelayMs;
-    this.speedtestOpts = speedtestOpts;
-    this.node = node;
-    this.store = store;
-    this.log = log;
+    this.run = run;
+    this.onDone = onDone;
+    this.onError = onError;
     this.timer = null;
     this.running = false;
     this.stopped = false;
     this.runCount = 0;
-    /** @type {Promise<object> | null} in-flight run shared with on-demand callers */
     this.inflight = null;
-    /** ISO timestamp of when the next run is scheduled, for /health */
     this.nextRunAt = null;
+    this.lastRunAt = null;
+  }
+
+  get enabled() {
+    return this.intervalMs > 0;
   }
 
   start() {
-    if (this.timer) return;
+    if (!this.enabled || this.timer) return;
     this.scheduleNext(this.firstDelayMs);
   }
 
@@ -59,21 +55,24 @@ export class SpeedtestScheduler {
       clearTimeout(this.timer);
       this.timer = null;
     }
+    this.nextRunAt = null;
   }
 
-  /**
-   * Run the speedtest right now, sharing the result with any in-flight
-   * scheduled run so on-demand callers don't double up.
-   */
+  /** Run now; rejects only when `run` itself throws. */
   runOnce() {
     if (this.inflight) return this.inflight;
     this.inflight = (async () => {
       this.running = true;
+      const n = ++this.runCount;
+      const t0 = Date.now();
       try {
-        const result = await runSpeedtest(this.speedtestOpts);
-        const stamped = { node: this.node, ...result };
-        await this.store.append(stamped);
-        return stamped;
+        const result = await this.run({ n });
+        this.lastRunAt = new Date().toISOString();
+        await this.hook(this.onDone, result, { n, elapsedMs: Date.now() - t0 });
+        return result;
+      } catch (e) {
+        await this.hook(this.onError, e, { n, elapsedMs: Date.now() - t0 });
+        throw e;
       } finally {
         this.running = false;
         this.inflight = null;
@@ -82,26 +81,30 @@ export class SpeedtestScheduler {
     return this.inflight;
   }
 
+  async hook(fn, ...args) {
+    try {
+      await fn(...args);
+    } catch (e) {
+      this.log.error('hook failed', { err: e });
+    }
+  }
+
   scheduleNext(delayOverride) {
-    if (this.stopped) return;
+    if (this.stopped || !this.enabled) return;
     const delay = typeof delayOverride === 'number'
       ? delayOverride
       : this.intervalMs + Math.round((Math.random() * 2 - 1) * this.intervalMs * this.jitterPct);
     this.nextRunAt = new Date(Date.now() + delay).toISOString();
     this.timer = setTimeout(() => { void this.tick(); }, delay);
-    // On Node, allow the process to exit if nothing else is keeping it
-    // alive — otherwise the scheduled timer would block graceful shutdown.
     if (typeof this.timer.unref === 'function') this.timer.unref();
   }
 
   async tick() {
-    const start = Date.now();
-    const n = ++this.runCount;
+    this.timer = null;
     try {
-      const r = await this.runOnce();
-      this.log(runBox({ n, elapsedMs: Date.now() - start, result: r }));
-    } catch (e) {
-      this.log(runBox({ n, elapsedMs: Date.now() - start, error: e?.message || String(e) }));
+      await this.runOnce();
+    } catch {
+      // already reported through onError
     } finally {
       this.scheduleNext();
     }

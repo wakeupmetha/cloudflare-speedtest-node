@@ -1,12 +1,10 @@
-// Pretty terminal output for the agent. Pure string builders that draw
-// box frames so a local `docker compose logs -f` shows the boot state
-// and each speedtest run at a glance — no panel needed to read results.
-//
-// Everything here is width-1 monospace glyphs (box-drawing + a few
-// arrows). No colour, no emoji — renders identically in a TTY and in
-// captured Docker logs.
+// Framed terminal output — the two things a person reads in
+// `docker logs aerio-agent`: the boot banner and each run's result. Every
+// other event is a one-line log.js entry. Width-1 glyphs only, no colour,
+// so it renders the same in a TTY and in captured Docker logs. Not printed
+// at all under LOG_JSON (a shipper cannot parse a box).
 
-const WIDTH = 59; // inner width, between the two vertical bars
+const WIDTH = 61; // inner width, between the two vertical bars
 
 const TL = '╭', TR = '╮', BL = '╰', BR = '╯', H = '─', V = '│';
 
@@ -44,18 +42,26 @@ function metricRow(symbol, label, value, unit, extra) {
   return row(pad(head, 15) + pad(`${value} ${unit}`, 16) + extra);
 }
 
-export function bootBanner({ node, bind, port, intervalMs, jitterPct, historyCount }) {
+export function bootBanner({ version, node, bind, port, intervalMs, jitterPct, historyCount, panelUrl, geocheck, geocheckIntervalMs }) {
   const sec = Math.round(intervalMs / 1000);
   const jit = Math.round(jitterPct * 100);
   return [
     topPlain(),
-    row('  cloudflare-speedtest-node'),
+    row(`  aerio-agent ${version}`),
     row(`  ip         ${node?.ip ?? 'unknown'}`),
     row(`  location   ${locationLine(node)}`),
+    row(`  panel      ${panelUrl || 'standalone (PANEL_URL empty)'}`),
+    row(`  geocheck   ${geocheck ? `${geocheck} · every ${humanMs(geocheckIntervalMs)}` : 'disabled (binary not found)'}`),
     row(`  listen     ${bind}:${port}   ·   auth on`),
-    row(`  interval   ${sec}s (±${jit}%)   ·   history ${historyCount} rows`),
+    row(`  speedtest  every ${sec}s (±${jit}%)   ·   history ${historyCount} rows`),
     bottom(),
   ].join('\n');
+}
+
+function humanMs(ms) {
+  if (!ms) return 'never';
+  if (ms >= 3_600_000) return `${Math.round(ms / 360_000) / 10}h`;
+  return `${Math.round(ms / 60_000)}m`;
 }
 
 function locationLine(node) {
@@ -69,14 +75,21 @@ export function runBox({ n, elapsedMs, result, error }) {
   if (error) {
     return [top, row(`   ✗ failed     ${error}`), bottom()].join('\n');
   }
-  const { download: dl, upload: ul, latency: lat } = result;
-  return [
+  const { download: dl, upload: ul, latency: lat, quality: q } = result;
+  const lines = [
     top,
-    metricRow('↓', 'download', num(dl?.median), 'mbps', `${num(dl?.min)}  ${H}${H}  ${num(dl?.max)}`),
-    metricRow('↑', 'upload', num(ul?.median), 'mbps', `${num(ul?.min)}  ${H}${H}  ${num(ul?.max)}`),
-    metricRow('~', 'latency', num(lat?.median), 'ms', `jitter ${num(lat?.jitter)} ms`),
-    bottom(),
-  ].join('\n');
+    metricRow('↓', 'download', num(dl?.mbps), 'mbps', `${num(dl?.min)}  ${H}${H}  ${num(dl?.max)}`),
+    metricRow('↑', 'upload', num(ul?.mbps), 'mbps', `${num(ul?.min)}  ${H}${H}  ${num(ul?.max)}`),
+    metricRow('~', 'latency', num(lat?.median), 'ms', `jitter ${num(lat?.jitter)} ms   loaded ${num(lat?.loadedDownload?.median, 0)} / ${num(lat?.loadedUpload?.median, 0)} ms`),
+  ];
+  if (q) {
+    lines.push(row(`   * quality    bloat ${q.bufferbloatGrade ?? '-'} (+${num(q.bufferbloatMs, 0)} ms)   ·   stability ${q.stabilityGrade ?? '-'} (cv ${num(q.stabilityCvPct)}%)`));
+  }
+  if (dl?.errors || ul?.errors) {
+    lines.push(row(`   ! errors     download ${dl?.errors ?? 0}   ·   upload ${ul?.errors ?? 0}`));
+  }
+  lines.push(bottom());
+  return lines.join('\n');
 }
 
 export function fatalBox(lines) {

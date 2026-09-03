@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "tool": "geocheck 0.3.0",
+  "timestamp": "2026-09-03T10:00:00Z",
+  "duration_ms": 21450,
+  "identity": { "ipv4": "203.0.113.10", "asn": 24940, "as_name": "Hetzner Online GmbH", "org": "Hetzner", "as_country": "DE" },
+  "transport": { "resolver": "auto" },
+  "findings": [
+    { "id": "hosting_address", "title": "Address belongs to a hosting provider", "severity": "warn", "detail": "Services that refuse datacenter ranges will refuse this one." }
+  ],
+  "reputation": {
+    "type": "hosting", "residential": false, "risk": 33, "confidence": 80, "flags": ["hosting"],
+    "proxy": false, "vpn": false, "tor": false, "hosting": true, "scraper": false, "compromised": false, "anonymous": false,
+    "provider": "Hetzner Online GmbH", "country": "Germany", "country_code": "DE"
+  },
+  "consensus": {
+    "ipv4": [
+      { "code": "DE", "country": "Germany", "count": 37, "total": 40, "percent": 92.5 },
+      { "code": "NL", "country": "Netherlands", "count": 3, "total": 40, "percent": 7.5 }
+    ]
+  },
+  "geo": {
+    "services": [
+      { "id": "google", "name": "Google", "kind": "country", "ipv4": { "value": "DE", "country": "Germany" } },
+      { "id": "google_captcha", "name": "Google Search captcha", "kind": "blocked", "ipv4": { "value": "yes" } },
+      { "id": "spotify_signup", "name": "Spotify signup", "kind": "availability", "ipv4": { "value": "yes" } },
+      { "id": "reddit_guest", "name": "Reddit guest access", "kind": "availability", "ipv4": { "value": "no" } },
+      { "id": "youtube_premium", "name": "YouTube Premium", "kind": "availability", "ipv4": { "error": "context deadline exceeded" } }
+    ],
+    "geoip": [],
+    "cdn": []
+  },
+  "connectivity_checks": { "clean": true, "plain_http_blocked": false, "ok": 6, "captive_portal": 0, "altered": 0, "unreachable": 0, "endpoints": [] },
+  "stash_checks": [
+    { "id": "chatgpt_web_access", "name": "ChatGPT (web)", "state": "available", "region": "DE", "rtt_ms": 48 },
+    { "id": "chatgpt_app_access", "name": "ChatGPT (app)", "state": "available", "region": "DE", "rtt_ms": 77 },
+    { "id": "youtube_premium_access", "name": "YouTube Premium", "state": "restricted", "detail": "Originals only", "rtt_ms": 106 },
+    { "id": "netflix_access", "name": "Netflix", "state": "available", "region": "DE", "detail": "full catalogue", "rtt_ms": 135 },
+    { "id": "claude_access", "name": "Claude", "state": "blocked", "detail": "Disallowed ISP", "rtt_ms": 164 },
+    { "id": "tiktok_access", "name": "TikTok", "state": "available", "region": "DE", "rtt_ms": 193 },
+    { "id": "gemini_access", "name": "Gemini", "state": "available", "region": "DE", "rtt_ms": 222 },
+    { "id": "notebooklm_access", "name": "NotebookLM", "state": "available", "region": "DE", "rtt_ms": 251 }
+  ],
+  "ai_endpoints": [
+    { "id": "openai", "name": "OpenAI", "vendor": "OpenAI", "state": "reachable", "http_status": 401, "detail": "answered, credentials not supplied", "rtt_ms": 60 },
+    { "id": "anthropic", "name": "Anthropic", "vendor": "Anthropic", "state": "reachable", "http_status": 401, "detail": "answered, credentials not supplied", "rtt_ms": 81 },
+    { "id": "gemini", "name": "Google Gemini", "vendor": "Google", "state": "reachable", "http_status": 401, "detail": "answered, credentials not supplied", "rtt_ms": 102 },
+    { "id": "deepseek", "name": "DeepSeek", "vendor": "DeepSeek", "state": "blocked", "http_status": 403, "detail": "the API refused this region", "rtt_ms": 123 },
+    { "id": "qwen_intl", "name": "Qwen (Singapore)", "vendor": "Alibaba", "state": "reachable", "http_status": 401, "detail": "answered, credentials not supplied", "rtt_ms": 144 },
+    { "id": "qwen_cn", "name": "Qwen (Beijing)", "vendor": "Alibaba", "state": "reachable", "http_status": 401, "detail": "answered, credentials not supplied", "rtt_ms": 165 },
+    { "id": "moonshot", "name": "Kimi / Moonshot", "vendor": "Moonshot", "state": "reachable", "http_status": 401, "detail": "answered, credentials not supplied", "rtt_ms": 186 },
+    { "id": "zhipu", "name": "Zhipu GLM", "vendor": "Zhipu", "state": "reachable", "http_status": 401, "detail": "answered, credentials not supplied", "rtt_ms": 207 }
+  ]
+}

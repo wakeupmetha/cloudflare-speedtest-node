@@ -112,7 +112,7 @@ curl -s -H "Authorization: Bearer devtok" localhost:9101/speedtest/last
 
 ### Heartbeat — `POST ${PANEL_URL}/api/agent/heartbeat`
 
-Headers: `Authorization: Bearer <TOKEN>`, `Content-Type: application/json`, `User-Agent: cloudflare-speedtest-node/<ver>`. 10 s timeout. Sent every `HEARTBEAT_MS`, immediately at boot, and right after every speedtest or geocheck run (success or failure).
+Headers: `Authorization: Bearer <TOKEN>`, `Content-Type: application/json`, `User-Agent: cloudflare-speedtest-node/<ver>`. 10 s timeout. Sent every `HEARTBEAT_MS`, immediately at boot, right after every speedtest run (success or failure — the failure travels as `lastRunError`), and after every **successful** geocheck run. A failed geocheck run only logs: the body has no field for it, and the previous digest stays valid.
 
 ```jsonc
 {
@@ -229,8 +229,8 @@ Bandwidth: ~50–250 MB per speedtest run at the defaults ⇒ ~2–12 GB/day/nod
 ## 8. Build & deploy
 
 - [Dockerfile](Dockerfile): `FROM ${GEOCHECK_IMAGE:-remnawave/geocheck:latest} AS geocheck` → `node:20-alpine`, copies `/usr/local/bin/geocheck`, `USER node`, `BIND=127.0.0.1`, no `npm install` layer (zero deps). Healthcheck `wget /health` every 30 s.
-- [docker-compose.yml](docker-compose.yml): one service `agent` (container `aerio-agent`), image from GHCR with `build: .` for local builds, **no `ports:`**, named volume `agent-data:/data`.
-- [.github/workflows/docker.yml](.github/workflows/docker.yml): `npm test` on every push/PR; on `main` and `v*` tags builds `linux/amd64,linux/arm64` and pushes `ghcr.io/wakeupmetha/cloudflare-speedtest-node:{latest,<semver>,sha-…}`.
+- [docker-compose.yml](docker-compose.yml): one service `agent` (container `aerio-agent`), image from GHCR with `build: .` for local builds, `env_file: .env` (so every knob in `.env.example` reaches the container; the `environment:` block only carries defaults), **no `ports:`**, named volume `agent-data:/data`.
+- [.github/workflows/docker.yml](.github/workflows/docker.yml): `npm test` on every push/PR (also `workflow_dispatch`); on `main` and `v*` tags builds `linux/amd64,linux/arm64` and pushes `ghcr.io/wakeupmetha/cloudflare-speedtest-node:{latest, X.Y.Z, X.Y}` — no per-commit tags, the `revision` label carries the sha. First run on 2026-09-03 (run 33735983736) was green; the package is created **private** by GitHub's default and must be flipped to public once in the package settings, or every node needs `docker login ghcr.io`.
 - The install line the panel shows (needs the image published — first push to `main` does that):
 
 ```bash
@@ -292,7 +292,7 @@ Read from the upstream's `src/engine/*.rs`, `metrics.rs`, `quality.rs`, `constan
 | Item | State |
 |---|---|
 | **Run on a real VPN node** | Not yet. First deploy = pick one node, run the install line, watch `paired as`, leave it a day, then clear the §top banner. |
-| **Published image** | The workflow exists; the first push to `main` publishes it. Until then the panel's install line names an image that does not exist yet. |
+| **Published image** | Published 2026-09-03 (`latest` = `0b75260`, amd64 + arm64). **Still private** until the package visibility is switched to public in GitHub — until then the install line needs `docker login ghcr.io` first. |
 | **Single-binary distribution** | Not planned: Node app; Docker is the install, `node src/index.js` the bare path. |
 | **History in the panel** | Not planned: the panel has no durable store; history stays on the agent (`/speedtest/history`, ndjson). |
 | **geocheck path analysis / tunnel detection** | Deliberately off (`--no-mtr --no-detect`): needs NET_RAW, takes minutes, different question. `GEOCHECK_ARGS` can turn it on; the digest ignores those sections. |

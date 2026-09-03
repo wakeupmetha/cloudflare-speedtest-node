@@ -1,6 +1,14 @@
 # Test on every push and PR; publish the multi-arch image to GHCR on main
 # and on v* tags. This is what makes the panel's one-line install work:
 #   ghcr.io/wakeupmetha/cloudflare-speedtest-node:latest
+#
+# Tags: `latest` from main, `X.Y.Z` + `X.Y` from a v* tag. No per-commit
+# tags — the image label org.opencontainers.image.revision already carries
+# the sha, and a tag per push is noise in the package list.
+#
+# The package is created PRIVATE on first publish (GitHub's default for a
+# user-owned package); flip it to public once in the package settings or
+# every node needs `docker login ghcr.io` before the install line works.
 name: docker
 
 on:
@@ -8,13 +16,17 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
       - run: npm test
@@ -27,7 +39,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -42,7 +54,7 @@ jobs:
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
-            type=sha
+            type=semver,pattern={{major}}.{{minor}}
       - uses: docker/build-push-action@v6
         with:
           context: .

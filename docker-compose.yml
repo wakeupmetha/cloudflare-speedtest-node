@@ -20,6 +20,11 @@ services:
     # whichever image is present.
     build: .
     restart: unless-stopped
+    # The whole .env reaches the container, so every knob in .env.example
+    # works from there; the environment: block below only supplies defaults
+    # for the ones people actually tune.
+    env_file:
+      - .env
     environment:
       # Where the panel lives. Empty = standalone (local API only).
       PANEL_URL: ${PANEL_URL:-}

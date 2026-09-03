@@ -80,10 +80,10 @@ export function runBox({ n, elapsedMs, result, error }) {
     top,
     metricRow('↓', 'download', num(dl?.mbps), 'mbps', `${num(dl?.min)}  ${H}${H}  ${num(dl?.max)}`),
     metricRow('↑', 'upload', num(ul?.mbps), 'mbps', `${num(ul?.min)}  ${H}${H}  ${num(ul?.max)}`),
-    metricRow('~', 'latency', num(lat?.median), 'ms', `jitter ${num(lat?.jitter)} ms   loaded ${num(lat?.loadedDownload?.median, 0)} / ${num(lat?.loadedUpload?.median, 0)} ms`),
+    metricRow('~', 'latency', num(lat?.median), 'ms', `jitter ${num(lat?.jitter)}  loaded ${num(lat?.loadedDownload?.median, 0)}/${num(lat?.loadedUpload?.median, 0)} ms`),
   ];
   if (q) {
-    lines.push(row(`   * quality    bloat ${q.bufferbloatGrade ?? '-'} (+${num(q.bufferbloatMs, 0)} ms)   ·   stability ${q.stabilityGrade ?? '-'} (cv ${num(q.stabilityCvPct)}%)`));
+    lines.push(metricRow('*', 'quality', `bloat ${q.bufferbloatGrade ?? '-'}`, `+${num(q.bufferbloatMs, 0)}ms`, `stability ${q.stabilityGrade ?? '-'}  cv ${num(q.stabilityCvPct)}%`));
   }
   if (dl?.errors || ul?.errors) {
     lines.push(row(`   ! errors     download ${dl?.errors ?? 0}   ·   upload ${ul?.errors ?? 0}`));

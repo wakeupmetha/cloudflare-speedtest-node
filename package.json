@@ -1,14 +1,15 @@
 {
   "name": "cloudflare-speedtest-node",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Cloudflare speedtest agent — HTTP endpoint that runs speedtest on demand",
+  "description": "Per-node Cloudflare speedtest + geocheck agent that pairs with the aerio panel",
   "type": "module",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "test": "node --test"
   }
 }

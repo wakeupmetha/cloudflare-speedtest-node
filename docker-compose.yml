@@ -1,54 +1,43 @@
-# Sample compose for a speedtest agent on a VPN node.
+# One agent per VPN node. Drop this next to the node's existing compose,
+# put PANEL_URL + TOKEN (from the panel's /nodes page) in `.env`, and:
 #
-# One agent per VPN node — drop this file alongside your existing
-# remnawave-node / xray-node compose, set the env in `.env`, and run:
+#   docker compose up -d
 #
-#   docker compose up -d --build
+# Then `docker compose logs -f` and look for:
 #
-# The agent runs standalone — it just listens and serves results. Any
-# client that presents the TOKEN can poll it (the aerio CRM panel, a
-# curl probe, anything). Generate a token with:  openssl rand -hex 24
+#   INFO   panel       paired as "<node name>"
 #
-# Port: 9101. Sits in the Prometheus exporter range (9100 = node_exporter,
-# 9090 = Prometheus, etc) — same family as other host-level metrics
-# agents, which is what this is. Don't change unless 9101 is already
-# taken on the host; the panel's SPEEDTEST_AGENTS env assumes 9101 by
-# default and we'd rather collisions stay rare than have a per-host
-# port soup to manage.
+# The panel is the only consumer and the agent CONNECTS OUT to it, so there
+# is no port to publish and no firewall rule to add. The local API on 9101
+# is loopback-only inside the container (healthcheck + debugging); publish
+# it with `ports:` and BIND=0.0.0.0 only if you want to curl it from the host.
 
 services:
-  speedtest:
-    container_name: aerio-speedtest
+  agent:
+    container_name: aerio-agent
+    image: ghcr.io/wakeupmetha/cloudflare-speedtest-node:latest
+    # `docker compose build` builds locally under the same tag; `up` uses
+    # whichever image is present.
     build: .
-    image: aerio/speedtest-agent:latest
     restart: unless-stopped
     environment:
-      # No SERVER_ID — the node self-identifies by public IP + location
-      # (ip-api.com lookup at boot), stamped onto every result.
-      #
-      # Shared secret checked on every request (Authorization: Bearer).
-      # Required — the agent refuses to start if it's empty.
+      # Where the panel lives. Empty = standalone (local API only).
+      PANEL_URL: ${PANEL_URL:-}
+      # The secret the panel minted for THIS node. Required.
       TOKEN: ${TOKEN}
-      # 30 minutes — matches the panel's expected cadence.
+      # Speedtest cadence (30 min) and its ±jitter.
       INTERVAL_MS: ${INTERVAL_MS:-1800000}
-      # ±15 % spread so a fleet of agents that boot in the same window
-      # don't all hit Cloudflare at the same second.
       JITTER_PCT: ${JITTER_PCT:-0.15}
-      # Lighter speedtest knobs — see src/index.js for defaults.
+      # Service-availability checks via geocheck (6 h; 0 disables).
+      GEOCHECK_INTERVAL_MS: ${GEOCHECK_INTERVAL_MS:-21600000}
+      # Measurement knobs — see .env.example.
       CONCURRENCY: ${CONCURRENCY:-4}
       DOWNLOAD_SEC: ${DOWNLOAD_SEC:-5}
       UPLOAD_SEC: ${UPLOAD_SEC:-5}
-      LATENCY_SAMPLES: ${LATENCY_SAMPLES:-20}
-      # How many rows to keep on disk. 1500 rows × 30 min ≈ 31 days.
       MAX_HISTORY: ${MAX_HISTORY:-1500}
-    ports:
-      # 9101 on both sides — one agent per VPN node, no port shuffling
-      # needed. The CRM panel reads from https://<host>:9101/speedtest/*.
-      - "${PUBLIC_PORT:-9101}:9101"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
-      # Persistent history — survives container recreations. Drop the
-      # named volume entirely if you're fine losing rows on `down -v`.
-      - speedtest-data:/data
+      - agent-data:/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9101/health"]
       interval: 30s
@@ -57,4 +46,4 @@ services:
       retries: 3
 
 volumes:
-  speedtest-data:
+  agent-data:

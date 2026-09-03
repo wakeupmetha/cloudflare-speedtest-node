@@ -1,96 +1,130 @@
-# cloudflare-speedtest-node
+# aerio-agent (cloudflare-speedtest-node)
 
-Lightweight Node.js daemon that runs Cloudflare speedtests on a fixed
-schedule, persists the rolling history locally, and exposes it over a
-small token-gated HTTP API. Standalone — it sits on a VPN node alongside
-`xray` / `remnawave-node` and serves results to whoever polls it (the
-aerio CRM panel is one such consumer, but the agent needs no panel to
-run).
+Per-node agent for the aerio panel. Runs a Cloudflare speedtest on a
+schedule, checks which consumer services accept the node's IP with
+[remnawave/geocheck](https://github.com/remnawave/geocheck), and reports
+both to the panel over an outbound heartbeat. Zero dependencies, one Docker
+image, one volume.
 
-No third-party dependencies. Single Docker image, one persistent volume
-for history. Clone, set `PORT` + `TOKEN` in `.env`, start — it runs on
-its own.
+Measurement follows [cloudflare-speed-cli](https://github.com/kavehtehrani/cloudflare-speed-cli):
+idle + loaded latency, steady-state throughput, bufferbloat and stability
+grades.
 
-## How it works
+## Install (from the panel)
 
-1. On boot, `src/index.js` loads `data/history.ndjson` into a ring
-   buffer, looks up the node's public IP + location once via ip-api.com
-   (this is its identity — no manual `SERVER_ID`), and starts a
-   background scheduler. The IP and city/country are printed in the
-   startup banner.
-2. The scheduler runs a Cloudflare speedtest every `INTERVAL_MS`
-   (default 30 min) with ±15 % jitter, stamps the node identity onto
-   each result, appends it to the ndjson file, and trims the ring to
-   `MAX_HISTORY` rows.
-3. Any consumer pulls fresh data over HTTP using the node's `TOKEN`.
-   The agent only makes outbound calls to `speed.cloudflare.com` (and
-   ip-api.com once at boot) — it never initiates traffic to a consumer,
-   it just waits to be polled.
-
-## Endpoints
-
-All routes return JSON. Everything except `/health` requires
-`Authorization: Bearer <TOKEN>`.
-
-| Route                     | Method | Notes                                                  |
-| ------------------------- | ------ | ------------------------------------------------------ |
-| `/health`                 | GET    | No auth. Returns scheduler state + history size.       |
-| `/speedtest/last`         | GET    | Most recent cached result. 404 until the first run.    |
-| `/speedtest/history`      | GET    | Rolling history. Query: `?since=<epoch_ms>&limit=<N>`. |
-| `/speedtest`              | GET    | Force a fresh run. Shares in-flight scheduled runs.    |
-
-## Quick start
+On the panel's `/nodes` page, click the key icon on a node → **Generate
+token**. The dialog shows the command with the panel URL and the token
+filled in:
 
 ```bash
-cp .env.example .env
-# edit .env:
-#   TOKEN — your own shared secret:  openssl rand -hex 24
-# (the node self-identifies by public IP + location — nothing else to set)
-docker compose up -d --build
-
-# probe from the host
-curl http://localhost:9101/health
-curl -H "Authorization: Bearer $TOKEN" http://localhost:9101/speedtest/last
+docker run -d --name aerio-agent --restart unless-stopped \
+  -e PANEL_URL=https://console.aerio.my -e TOKEN=<token> \
+  -v aerio-agent-data:/data ghcr.io/wakeupmetha/cloudflare-speedtest-node:latest
 ```
 
-The agent refuses to start if `TOKEN` is empty, so it can't accidentally
-come up as an open API on a public port.
+Then watch it pair:
 
-## Token rotation
+```bash
+docker logs -f aerio-agent
+# 12:00:02  INFO   panel       paired as "de-fra-1"  url=https://console.aerio.my rtt=84
+```
 
-The token is just a shared secret in this node's `.env`. To rotate:
+The agent connects **out** to the panel. No port to open, no TLS on the
+node, no firewall rule. The card on `/nodes` shows the node within 30 s.
 
-1. Generate a new value (`openssl rand -hex 24`) and update `TOKEN`.
-2. `docker compose up -d` to restart with it.
-3. Update the same value in whatever consumer polls this node.
+### With compose
 
-Until step 3 lands, that consumer will get 401s. Tokens never expire on
-the agent side — rotate only when you want to.
+```bash
+cp .env.example .env     # set PANEL_URL + TOKEN
+docker compose up -d
+docker compose logs -f
+```
 
-## Bandwidth budget
+### Without Docker
 
-Defaults (4 streams × 5 s download + 5 s upload) cost roughly
-50–250 MB per run depending on the link's actual capacity. At the
-default 30-minute cadence that's ~2–12 GB/day per node. Increase
-`CONCURRENCY` / `DOWNLOAD_SEC` for higher fidelity, increase
-`INTERVAL_MS` to spend less.
+Node ≥ 20 and, for the service checks, the `geocheck` binary on `PATH`
+(`go install github.com/remnawave/geocheck/cmd/geocheck@latest`, or a release
+tarball). No `npm install` — there is nothing to install.
+
+```bash
+PANEL_URL=https://console.aerio.my TOKEN=<token> node src/index.js
+```
+
+## What the panel receives
+
+Every 30 s (and right after each run) the agent POSTs to
+`${PANEL_URL}/api/agent/heartbeat` with `Authorization: Bearer <TOKEN>`:
+its version and public IP/geo, whether a run is in progress, the latest
+speedtest row, the reason of the last failed run, and the latest geocheck
+digest. The panel answers with the node name it resolved the token to and
+any queued commands (`speedtest`, `geocheck` — the "Run now" buttons).
+
+## Reading the logs
+
+One line per event, same format as the panel:
+
+```
+12:00:01  INFO   boot        aerio-agent 0.2.0 starting  panel=https://console.aerio.my geocheck=/usr/local/bin/geocheck listen=127.0.0.1:9101
+12:00:02  INFO   panel       paired as "de-fra-1"  url=https://console.aerio.my rtt=84
+12:00:07  INFO   speedtest   run #1 started
+12:00:21  INFO   speedtest   run #1 done  dl=918.5 ul=482 lat=11.8 jitter=1.6 bloat=A stability=A colo=ARN elapsed=14.1s
+12:01:02  INFO   geocheck    run #1 done  available=11 restricted=1 blocked=2 country=DE reputation=hosting elapsed=21.4s
+12:01:02  WARN   geocheck    blocked: Google Search captcha, TikTok
+```
+
+The lines to look for when a node does not show up:
+
+| Line | Meaning | Fix |
+|---|---|---|
+| `ERROR  panel  token rejected by panel — regenerate it on /nodes and restart the agent` | The panel does not know this TOKEN | Generate a token for this node on `/nodes`, put it in `.env`, restart |
+| `WARN   panel  unreachable  err="fetch failed: ECONNREFUSED"` | `PANEL_URL` is wrong or the panel is down | Check the URL; the agent retries every 30 s and logs `paired as …` when it recovers |
+| `WARN   panel  node address mismatch — is this token for this node?` | The token belongs to a different Remnawave node | You pasted another node's command |
+| `WARN   geocheck  binary not found` | Bare install without `geocheck` on `PATH` | Install it or set `GEOCHECK_BIN`; speedtests still run |
+| `WARN   speedtest  run #N failed  err="no bytes transferred …"` | `speed.cloudflare.com` unreachable from the node | Network / egress problem on the node |
+
+Each speedtest also prints a framed result box. `LOG_JSON=1` switches to one
+JSON object per line (no boxes); `LOG_LEVEL=debug` shows every heartbeat.
+
+## Local API
+
+Loopback-only by default (`BIND=127.0.0.1`); the panel never reads it.
+
+| Route | Auth | Returns |
+|---|---|---|
+| `GET /health` | none | scheduler state, pairing state (`panel.paired`, `panel.lastError`), geocheck state |
+| `GET /speedtest/last` | Bearer | last result (404 before the first run) |
+| `GET /speedtest/history?since=<ms>&limit=<n>` | Bearer | rolling history |
+| `GET /speedtest` | Bearer | force a run (shares an in-flight one) |
+| `GET /geocheck/last` | Bearer | last geocheck digest |
+| `GET /geocheck` | Bearer | force a geocheck run |
+
+```bash
+docker exec aerio-agent wget -qO- http://127.0.0.1:9101/health
+```
 
 ## Environment
 
-See `.env.example` for the full list. The most common knobs:
+See `.env.example` for everything. The ones that matter:
 
-| Var           | Default | Meaning                              |
-| ------------- | ------- | ------------------------------------ |
-| `TOKEN`       | (empty) | Shared bearer secret. **Required — agent won't start without it.** |
-| `INTERVAL_MS` | 1800000 | Scheduler cadence (30 min).          |
-| `JITTER_PCT`  | 0.15    | ±N % spread on each interval.        |
-| `PORT`        | 9101    | Listening port (Prometheus exporter range, next to node_exporter on 9100). |
-| `DATA_DIR`    | ./data  | History ndjson lives here.           |
-| `MAX_HISTORY` | 1500    | Rows kept on disk + in memory.       |
+| Var | Default | Meaning |
+|---|---|---|
+| `PANEL_URL` | (empty = standalone) | Panel origin, e.g. `https://console.aerio.my` |
+| `TOKEN` | — | **Required.** Minted on `/nodes` |
+| `HEARTBEAT_MS` | 30000 | Heartbeat cadence (floor 5 s) |
+| `INTERVAL_MS` | 1800000 | Speedtest cadence (floor 60 s), ±`JITTER_PCT` |
+| `GEOCHECK_INTERVAL_MS` | 21600000 | geocheck cadence (floor 10 min; 0 disables) |
+| `CONCURRENCY` / `DOWNLOAD_SEC` / `UPLOAD_SEC` | 4 / 5 / 5 | Streams and phase lengths (≈50–250 MB per run) |
+| `LOG_LEVEL` | info | `none` … `debug`; `LOG_JSON=1`, `LOG_COLOR=0` |
 
-## Local dev (no Docker)
+## Token rotation
+
+Rotate on `/nodes` (the dialog shows the new install command), update `TOKEN`
+in `.env`, `docker compose up -d`. Until the agent restarts with the new
+value it logs `token rejected` every 10 minutes and keeps measuring.
+
+## Development
 
 ```bash
-npm install   # writes lockfile if missing; no deps to install
-TOKEN=devtok INTERVAL_MS=120000 npm start
+npm test                                   # node --test, no framework
+TOKEN=devtok PANEL_URL=http://localhost:3030 INTERVAL_MS=120000 node src/index.js
 ```

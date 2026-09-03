@@ -1,10 +1,10 @@
 # CLAUDE.md
 
-This file is the single source of truth for everything currently implemented in `cloudflare-speedtest-node`. It supersedes `README.md` for technical content.
+This file is the single source of truth for everything currently implemented in `cloudflare-speedtest-node` (the container is called `aerio-agent`). It supersedes `README.md` for technical content.
 
-> **Status: IN-DEV / NOT YET TESTED IN PRODUCTION (as of 2026-05-19).** Code is written end-to-end and compiles, but no agent has been deployed to a real VPN node, no panel has successfully polled this service, and the `aerio-crm` consumer side has been validated only against mock data. Treat every claim about "what happens at runtime" as a design contract, not a verified fact. The repo is referenced from `aerio-crm` and `aerio-v2` documentation as the per-node speedtest agent — that integration is **planned, not live**.
+> **Status (2026-09-03): v2, push model. Wire contract validated by tests and by a local end-to-end run against the panel, not yet by a production node.** Every module has `node --test` coverage and the measurement path has been run live against `speed.cloudflare.com`. What has NOT happened: a real VPN node running the published image for a day. Clear this banner when that has.
 
-There are no separate spec files for this repo. When in-dev sections become tested-in-prod, update this file (clear the "Status" banner from each section).
+There are no separate spec files in this repo. The cross-repo design that produced v2 lives in the panel: [aerio-crm/docs/superpowers/specs/2026-09-03-speedtest-agent-v2-design.md](../aerio-crm/docs/superpowers/specs/2026-09-03-speedtest-agent-v2-design.md) until it is folded into `aerio-crm/CLAUDE.md`.
 
 ---
 
@@ -14,23 +14,21 @@ There are no separate spec files for this repo. When in-dev sections become test
 
 ### When you must touch CLAUDE.md in the same commit
 
-- Adding/changing an HTTP endpoint → §4
-- Changing the scheduler cadence, jitter logic, or in-flight sharing → §5
-- Changing the storage format, compaction, or hydration → §6
+- Changing the heartbeat body / response, or the local HTTP routes → §4
+- Changing a scheduler's cadence, floor, jitter or in-flight rule → §5
+- Changing the storage format, compaction, or the geocheck digest file → §6
 - Adding/changing an env var → §7
-- Changing the Dockerfile, docker-compose service, or healthcheck → §8
-- Changing the auth model (token format, header name) → §1 + §4
-- A section currently marked "in-dev" graduates to "tested" → clear the banner from that section and update §9
+- Changing the Dockerfile, compose, workflow or healthcheck → §8
+- Changing a log line an operator is told to grep for → §9
+- Changing how a number is measured → §10 (and say which upstream behaviour it now matches or departs from)
+- A "not yet" in §11 becomes "done" → move it into the section that owns it
 
-If your change doesn't fit cleanly into an existing section, the section needs restructuring — flag it in the PR description.
+### What this protocol forbids
 
-### What this protocol explicitly forbids
+- Scattered `*.md` files describing implemented behaviour (delete and absorb here).
+- `TODO.md`, or `// TODO` comments without a §11 entry.
 
-- Scattered `*.md` files describing implemented behavior (delete and absorb here).
-- `TODO.md`. If the work is real, write a section in §9 (Known gaps) until done; if it's a one-line tweak, do it.
-- Comments like `// TODO: refactor` without a referenced reason in §9.
-
-The same protocol applies in sibling repos (`aerio-crm`, `aerio-v2`, `aerio-web`). Cross-repo features touch two CLAUDE.md files in the same atomic change.
+The same protocol applies in `aerio-crm`; the heartbeat contract is documented on BOTH sides (§4 here, §4/§6.2 there) and changes in one atomic cross-repo change.
 
 ---
 
@@ -38,394 +36,277 @@ The same protocol applies in sibling repos (`aerio-crm`, `aerio-v2`, `aerio-web`
 
 | Property | Value |
 |---|---|
-| Purpose | Per-node Cloudflare speedtest daemon. Runs scheduled throughput/latency probes, persists rolling history locally, exposes results over a token-gated HTTP API for the aerio CRM panel to poll. |
-| Status | **in-dev, not deployed** |
-| Language | Node.js (ES modules, no third-party dependencies) |
-| Runtime | Node ≥ 18 (Dockerfile pins `node:20-alpine`) |
-| Source size | 790 LOC across 11 modules ([src/](src/)) |
-| HTTP port | **9101** (Prometheus exporter range — adjacent to `node_exporter` on 9100; signals "host-level metrics exporter" intent to anyone reading compose) |
-| Storage | One ndjson file per node, ring-buffer-capped (default 1500 rows ≈ 31 days at 30-min cadence) |
-| Outbound traffic | `speed.cloudflare.com` (every run) + `ip-api.com` (once at boot, for IP/geo identity). **Never initiates calls to a consumer** — consumers pull. |
-| Deployment model | One agent per VPN node, alongside `xray` / `remnawave-node` containers |
-| Sibling projects | `aerio-crm` (consumer, see §10), `aerio-v2` (panel; one possible consumer of this agent's API) |
+| Purpose | Per-node agent: Cloudflare speedtest on a schedule + service-availability checks via `remnawave/geocheck`, reported to the aerio panel over an **outbound** heartbeat. Beszel-style install: the panel mints a token and shows the `docker run` line. |
+| Language | Node.js ≥ 20, ES modules, **no third-party dependencies** (`node:*` only) |
+| Source | ~1 650 LOC in [src/](src/), 15 modules; tests in [test/](test/) (`node --test`, no framework) |
+| Image | `ghcr.io/wakeupmetha/cloudflare-speedtest-node:latest` (multi-arch, built by [.github/workflows/docker.yml](.github/workflows/docker.yml)); bundles the `geocheck` binary copied from `remnawave/geocheck` |
+| Local port | **9101**, **loopback only** by default — the panel never reads it |
+| Storage | `/data/history.ndjson` (ring, 1500 rows ≈ 31 days) + `/data/geocheck.json` (last digest) |
+| Outbound traffic | `speed.cloudflare.com` (each run), `ip-api.com` (once at boot), `PANEL_URL` (every 30 s), the ~40 hosts geocheck probes (every 6 h) |
+| Consumer | `aerio-crm` — `services/api` ingests `POST /agent/heartbeat`; `/nodes` renders it. Detail: [aerio-crm/CLAUDE.md §4](../aerio-crm/CLAUDE.md) |
 
-### Integration contract with the aerio CRM (planned)
+### Pairing in one paragraph
 
-The agent exposes 4 routes on port 9101. The CRM's local Fastify service ([aerio-crm/services/api/src/pollers/speedtest.ts](../aerio-crm/services/api/src/pollers/speedtest.ts)) is expected to poll one specific route on a 60s cadence:
-
-```
-GET https://<node-host>:9101/speedtest/last
-Authorization: Bearer <TOKEN>
-```
-
-Returns the most recent cached run as JSON, or `404 {"error": "no result yet"}` until the first scheduled run completes (default first delay 5s + 5s download + 5s upload + serialization ≈ 15s after boot).
-
-The agent's `TOKEN` is a **shared secret set by the operator** in this node's `.env` — the agent owns its own token; nothing issues it. The agent runs fully standalone: clone the repo, set `PORT` + `TOKEN`, `docker compose up`, and it schedules runs and serves results on its own. A consumer (the CRM panel, a curl probe, any poller) authenticates by presenting the same `TOKEN`. Flow:
-
-1. Operator generates a secret (`openssl rand -hex 24`) and sets `TOKEN` in `.env`
-2. `docker compose up -d` — the agent starts and begins serving
-3. Operator gives the same value to whatever will poll this node (e.g. the CRM panel's per-node config)
-
-**Empty token is fatal:** the agent refuses to start with an empty `TOKEN` (fail-fast, `exit 1`) so it can never come up as an open API on a public port. See §4.
-
-**Status:** the CRM panel still has per-node token storage on its side ([aerio-crm/src/server/repos/speedtest-tokens.ts](../aerio-crm/src/server/repos/speedtest-tokens.ts), [aerio-crm/src/server/actions/speedtest.ts](../aerio-crm/src/server/actions/speedtest.ts)), but that is now just the panel remembering the operator-set secret — the agent does not depend on it and is never told about it out of band. Never validated against a real agent. Token storage is scheduled to migrate to `aerio-v2/services/web-api` per the [drop-direct-db spec](../aerio-crm/docs/superpowers/specs/2026-05-19-crm-drop-direct-db-design.md); the agent-side contract is unaffected.
+The panel stores one opaque secret per Remnawave node name (`admin.speedtest.tokens` in aerio-v2's `global_settings`). The agent presents that secret as `Authorization: Bearer` on every heartbeat; the panel resolves **token → node name** with a constant-time compare, so the agent never states its own name and cannot claim another node's. The agent's self-reported public IP is cross-checked against the Remnawave node address; a mismatch is a warning on both ends, not a rejection.
 
 ---
 
 ## 2. Local development
 
-### Without Docker
-
 ```bash
-npm install   # writes lockfile only — there are no third-party deps to install
-TOKEN=devtok INTERVAL_MS=120000 npm start
+npm test                                            # 23 tests, ~2 s
+TOKEN=devtok node src/index.js                      # standalone: no push, local API only
+TOKEN=devtok PANEL_URL=http://localhost:3030 INTERVAL_MS=120000 node src/index.js   # against a local panel
 ```
 
-The 2-minute interval is friendly for iteration. Floor enforced by the scheduler at 60s — anything below is silently raised.
+The panel side for the last line: `npm run dev` + `npm run dev:api` in `aerio-crm`, then generate a token on `http://localhost:3030/nodes` for a Remnawave node and use it as `TOKEN`. Within 30 s the card shows `agent v0.2.0 · seen just now`.
+
+`geocheck` is not on a dev machine's PATH unless you put it there (`go install github.com/remnawave/geocheck/cmd/geocheck@latest`); without it the agent logs one WARN and runs speedtests only.
+
+Probing the local API:
 
 ```bash
-curl http://localhost:9101/health
-curl -H "Authorization: Bearer devtok" http://localhost:9101/speedtest/last
-curl -H "Authorization: Bearer devtok" http://localhost:9101/speedtest
+curl -s localhost:9101/health | jq .panel          # {url, paired, node, lastOkAt, lastError}
+curl -s -H "Authorization: Bearer devtok" localhost:9101/speedtest/last
 ```
 
-The agent will not boot without `TOKEN` set — an empty value is fatal (fail-fast, `exit 1`), printed as a framed error box.
+---
 
-### With Docker (matches production deployment)
+## 3. Architecture
 
-```bash
-cp .env.example .env
-# Edit .env: set TOKEN (your own shared secret, openssl rand -hex 24).
-# No SERVER_ID — the node self-identifies by IP/geo. See §1.
-docker compose up -d --build
-docker compose logs -f speedtest
+```
+┌──────────────────────────────────────────────────────────────┐
+│ node process (src/index.js — composition only)               │
+│                                                              │
+│  Scheduler "speedtest"  ── runSpeedtest() ──▶ HistoryStore   │
+│     every INTERVAL_MS ± jitter                    (ndjson)   │
+│  Scheduler "geocheck"   ── runGeocheck()  ──▶ geocheck.json  │
+│     every GEOCHECK_INTERVAL_MS ± jitter                      │
+│  panel client ── POST PANEL_URL/api/agent/heartbeat ─────────┼──▶ aerio-crm
+│     every HEARTBEAT_MS + after every run    ◀── {commands}   │
+│  http server (127.0.0.1:9101) — healthcheck + curl           │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-The Docker image lives at `aerio/speedtest-agent:latest` (built locally by compose). The healthcheck inside the container hits `http://127.0.0.1:9101/health` every 30s.
+| File | Responsibility |
+|---|---|
+| `index.js` | env → fail-fast → store → geo identity → the two schedulers → panel client → local API → banner → signals |
+| `scheduler.js` | Generic jittered `setTimeout` loop; `runOnce()` shares the in-flight promise; `onDone`/`onError` hooks are contained |
+| `speedtest.js` | One run: meta → idle latency → download ∥ loaded latency → upload ∥ loaded latency → quality grades |
+| `throughput.js` | N-stream download/upload with 200 ms rate sampling, ramp-up exclusion, backoff, 429 halving, upload rollback |
+| `latency.js` | Duration-based RTT probe loop (`/__down?bytes=0`), warm-up excluded, injectable `probe` for tests |
+| `client.js` | Cloudflare URLs + headers (`measId`, `during=`, Referer, User-Agent), `/cdn-cgi/trace`, `/meta` |
+| `stats.js` | summary / stddev / CV / percentiles / bufferbloat + stability grades (upstream constants) |
+| `geocheck.js` | `execFile` the binary with `--json --quiet …`, **digest** the report, persist |
+| `panel.js` | Heartbeat client: transition logging, command dispatch, `status()` for `/health` |
+| `server.js` | Local routes, Bearer check (timing-safe), one access-log line per request |
+| `storage.js` | ndjson ring buffer with compaction (unchanged from v1) |
+| `geo.js` | One-shot ip-api.com identity lookup (unchanged) |
+| `log.js` | Line logger — port of aerio-crm `src/server/log.ts` |
+| `format.js` | Boot banner + per-run result box (the two framed outputs) |
+| `version.js` | `VERSION` from package.json |
 
-### Scripts ([package.json](package.json))
+---
 
-| Script | Command | Purpose |
+## 4. Wire contract
+
+### Heartbeat — `POST ${PANEL_URL}/api/agent/heartbeat`
+
+Headers: `Authorization: Bearer <TOKEN>`, `Content-Type: application/json`, `User-Agent: cloudflare-speedtest-node/<ver>`. 10 s timeout. Sent every `HEARTBEAT_MS`, immediately at boot, and right after every speedtest or geocheck run (success or failure).
+
+```jsonc
+{
+  "agent": { "version": "0.2.0", "startedAt": "…", "heartbeatMs": 30000, "intervalMs": 1800000, "geocheckIntervalMs": 21600000, "geocheck": true },
+  "node": { "ip": "203.0.113.10", "country": "Germany", "countryCode": "DE", "region": "Hesse", "city": "Frankfurt", "isp": "Hetzner" },
+  "running": false, "nextRunAt": "…", "lastRunAt": "…",
+  "lastRunError": null,                 // reason of the newest FAILED run; null after a success
+  "last": { …speedtest row, §4 below… } | null,
+  "geocheck": { …digest, §4 below… } | null
+}
+```
+
+Response `200`:
+
+```jsonc
+{ "ok": true, "node": "de-fra-1", "commands": ["speedtest"], "expectedIp": "203.0.113.10" | null }
+```
+
+- `commands` — each is run once through the matching scheduler's `runOnce()` (in-flight shared), **not awaited** by the heartbeat: the run's completion pushes its own heartbeat.
+- `expectedIp` — the Remnawave node address when it is an IP literal; a mismatch with `node.ip` logs one WARN per distinct value.
+- `401 {error:"unknown_token", hint}` — logged at ERROR once and every 10 min while it persists.
+- any other failure — WARN on transition, DEBUG while it persists, INFO `paired as` on recovery with `after=<seconds>`.
+
+### Speedtest row (one history line; `last` in the heartbeat)
+
+```jsonc
+{
+  "startedAt": "…", "finishedAt": "…", "elapsedMs": 14120, "measId": "8391027364512830",
+  "meta": { "ip", "colo", "loc", "http", "tls", "asn", "asOrganization", "city", "country" },
+  "latency": { "mean", "median", "p25", "p75", "min", "max", "jitter", "samples", "sent", "lost",
+               "loadedDownload": { …same summary… }, "loadedUpload": { …same summary… } },
+  "download": { "mbps", "mean", "median", "p25", "p75", "min", "max", "cvPct", "samples", "totalBytes", "durationMs", "errors" },
+  "upload":   { …same… },
+  "quality":  { "bufferbloatMs", "bufferbloatGrade", "stabilityCvPct", "stabilityGrade" }
+}
+```
+
+`mbps` is the steady-state **mean** (the panel's headline); `median`/quartiles ride along. Bandwidth in Mbit/s, latency in ms. `node` is NOT stamped on rows any more (it is per-process and travels in the heartbeat); the local `/speedtest/last` still returns `{node, …row}`.
+
+### geocheck digest (`geocheck` in the heartbeat)
+
+```jsonc
+{
+  "ranAt": "…", "durationMs": 21450, "tool": "geocheck 0.3.0", "schema": 1,
+  "ip": "203.0.113.10", "asn": 24940, "asName": "Hetzner Online GmbH",
+  "country": { "code": "DE", "name": "Germany", "percent": 92.5 } | null,      // consensus.ipv4[0]
+  "reputation": { "type": "hosting", "risk": 33, "vpn": false, "proxy": false, "tor": false, "hosting": true, "flags": ["hosting"] } | null,
+  "services": [ { "id": "netflix_access", "name": "Netflix", "state": "available|restricted|blocked|error", "region"?: "DE", "detail"?: "…" } ],
+  "findings": [ { "id", "title", "severity", "detail" } ],
+  "summary": { "available": 11, "restricted": 1, "blocked": 2, "error": 0 }
+}
+```
+
+`services` = `stash_checks` ∪ `ai_endpoints` (`reachable`→`available`) ∪ `geo.services` rows of kind `availability` (`yes`→available, `no`→blocked) or `blocked` (`yes`→blocked, `no`→available); an `error` field → `error`; country-kind rows are dropped. [geocheck.js](src/geocheck.js) is the only place that knows geocheck's schema (`internal/render/json.go`, schema 1); a different `schema` is digested best-effort and logged.
+
+### Local HTTP API (loopback)
+
+| Route | Auth | Returns |
 |---|---|---|
-| `start` | `node src/index.js` | The only script — there's no test or build step today |
+| `GET /health` | none | `{ok, version, node, hasHistory, historyCount, lastRunAt, nextRunAt, running, panel: {url, paired, node, lastOkAt, lastError} \| null, geocheck: {enabled, lastRunAt, nextRunAt, running, hasResult} \| {enabled:false}}` |
+| `GET /speedtest/last` | Bearer | `{node, …row}` · 404 before the first run |
+| `GET /speedtest/history?since=<ms>&limit=<n>` | Bearer | `{node, count, rows[]}` oldest-first |
+| `GET /speedtest` | Bearer | force a run; shares an in-flight one; 500 with the reason on failure |
+| `GET /geocheck/last` | Bearer | digest · 404 when none / disabled |
+| `GET /geocheck` | Bearer | force a geocheck run |
 
-No tests, no linter, no formatter configured. Adding any of these is fair game; flag it in §9 if it stays unfinished across PRs.
-
----
-
-## 3. Architecture — single Node process, three concerns
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Node.js process (src/index.js)                                  │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │ HTTP server  ([src/server.js])                              │ │
-│  │  • GET /health (no auth, returns scheduler state)           │ │
-│  │  • GET /speedtest/last       (Bearer)                       │ │
-│  │  • GET /speedtest/history    (Bearer)                       │ │
-│  │  • GET /speedtest            (Bearer — force a fresh run)   │ │
-│  └────────────────────────────────────────────────────────────┘ │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │ Scheduler ([src/scheduler.js])                              │ │
-│  │  • setTimeout-based (NOT setInterval — no overlapping runs) │ │
-│  │  • interval ± jitter %                                      │ │
-│  │  • shares in-flight runs with on-demand callers             │ │
-│  └────────────────────────────────────────────────────────────┘ │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │ History store ([src/storage.js])                            │ │
-│  │  • In-memory ring buffer (newest last)                      │ │
-│  │  • Append-only ndjson on disk                               │ │
-│  │  • Compacts when file grows past maxEntries × 2             │ │
-│  └────────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
-       │                                          ▲
-       │ HTTPS to speed.cloudflare.com            │ HTTPS poll from panel
-       ▼                                          │ (Bearer TOKEN)
-   Cloudflare edge                            aerio-crm services/api
-```
-
-The three concerns share state through the `store` and `scheduler` objects, both constructed in [src/index.js](src/index.js) and passed by reference. Nothing is global; nothing reaches across processes.
-
-Modules in [src/](src/):
-
-| File | LOC | Responsibility |
-|---|---|---|
-| `index.js` | 85 | Boot — reads env, fail-fast on empty `TOKEN`, looks up IP/geo identity, constructs scheduler + store + HTTP server, prints the boot banner, wires SIGINT/SIGTERM |
-| `throughput.js` | 116 | Multi-stream download + upload measurement |
-| `storage.js` | 110 | ndjson read/write, ring buffer, compaction |
-| `scheduler.js` | 109 | Run-loop, jitter, in-flight sharing, per-run pretty logging |
-| `server.js` | 102 | HTTP routes and auth check |
-| `format.js` | 84 | Pretty box-drawing terminal output — boot banner, per-run result/failure boxes, fatal box |
-| `geo.js` | 47 | One-shot IP/location lookup via ip-api.com — the node's identity, in place of a manual SERVER_ID |
-| `speedtest.js` | 47 | Orchestrates one run — calls latency + throughput, normalizes the result |
-| `stats.js` | 37 | Mean / median / quartile helpers |
-| `client.js` | 27 | Bare HTTP client for Cloudflare endpoints |
-| `latency.js` | 26 | Latency + jitter samples (small HEAD requests to Cloudflare) |
-
-**No third-party deps.** Everything uses Node's built-in `node:http`, `node:fs/promises`, `node:os`, `node:url`, `node:crypto`.
-
-### Logging
-
-The agent logs to stdout/stderr only (no log file; `docker compose logs` collects it). Output is framed with box-drawing characters so a local operator can read run results without the panel:
-
-- **Boot banner** (`format.bootBanner`) — public IP + location (city, country), listen address, auth state, interval, history size.
-- **Per-run box** (`format.runBox`, emitted by the scheduler) — run number, elapsed, download/upload median + min──max, latency median + jitter. Failures render a one-line `✗ failed <reason>` box.
-- **Fatal box** (`format.fatalBox`) — printed to stderr when `TOKEN` is empty, immediately before `exit 1`.
-
-There is **no HTTP access log** — requests (401/404/200) are silent. See §9 if that becomes a debugging need.
+Bearer is compared with `crypto.timingSafeEqual`. One access-log line per request (`GET /speedtest/last 401  ms=1 auth=bad`); `/health` 2xx is silent.
 
 ---
 
-## 4. HTTP API
+## 5. Schedulers ([src/scheduler.js](src/scheduler.js))
 
-All routes return JSON. Everything except `/health` requires `Authorization: Bearer <TOKEN>` — exact, timing-unsafe string compare against the env value. The token is an opaque operator-set shared secret (not a JWT, nothing parses it). The agent refuses to start if `TOKEN` is empty, so there is no "open" code path: a missing token kills the process at boot rather than disabling auth.
+One class, two instances. `setTimeout`-based: the follow-up is scheduled only after the current run resolves, so runs never overlap. `intervalMs ± jitterPct`. `runOnce()` returns the in-flight promise when one exists — a tick, an on-demand HTTP call and a panel command that coincide share one run. `onDone` / `onError` are hooks; their own exceptions are logged and never break the loop. `intervalMs = 0` disables `start()` (used by `GEOCHECK_INTERVAL_MS=0`); `runOnce()` still works.
 
-> **Status:** endpoints are implemented and respond to requests in dev (verified: boot banner, `/health`, 401 on missing/bad token, 404 before first run, clean SIGTERM). **Not validated** against the CRM's actual poller code. The `aerio-crm` consumer ([repos/speedtest.ts](../aerio-crm/src/server/repos/speedtest.ts), [services/api/src/pollers/speedtest.ts](../aerio-crm/services/api/src/pollers/speedtest.ts)) expects the shapes below; deviation will break the integration silently.
+| Instance | Cadence | Floor | First run | On done | On error |
+|---|---|---|---|---|---|
+| `speedtest` | `INTERVAL_MS` (30 min) | 60 s | `FIRST_DELAY_MS` (5 s) | append to history, INFO line + result box, heartbeat | `lastRunError`, WARN + failed box, heartbeat |
+| `geocheck` | `GEOCHECK_INTERVAL_MS` (6 h) | 10 min | 60 s | save digest, INFO line, WARN listing blocked names, heartbeat | WARN with stderr head; previous digest kept |
 
-### `GET /health` (no auth)
-
-Liveness + scheduler state. The Docker HEALTHCHECK and a consumer's "is this agent alive" probe both hit this.
-
-```json
-{
-  "ok": true,
-  "node": { "ip": "104.28.193.219", "country": "Sweden", "countryCode": "SE", "region": "Stockholm County", "city": "Stockholm", "isp": "Cloudflare, Inc." },
-  "hasHistory": true,
-  "historyCount": 47,
-  "lastRunAt": "2026-05-19T01:23:45.000Z",
-  "nextRunAt": "2026-05-19T01:53:12.000Z",
-  "running": false
-}
-```
-
-`lastRunAt` is `null` until the first scheduled run completes. `running` is `true` while a speedtest is in flight. `node` is the IP/geo identity looked up once at boot via ip-api.com; if the lookup failed every field is `null` (plus an `error` string) — the agent still serves.
-
-### `GET /speedtest/last` (Bearer)
-
-Most-recent cached result. Returns `404 {"error": "no result yet"}` before the first run completes.
-
-```json
-{
-  "node": { "ip": "104.28.193.219", "country": "Sweden", "countryCode": "SE", "region": "Stockholm County", "city": "Stockholm", "isp": "Cloudflare, Inc." },
-  "startedAt": "2026-05-19T01:23:45.000Z",
-  "finishedAt": "2026-05-19T01:23:58.000Z",
-  "elapsedMs": 13002,
-  "meta": { "ip": "104.28.193.219", "colo": "ARN", "loc": "SE", "http": "http/1.1", "tls": "TLSv1.3", "asn": null, "asOrganization": null, "city": null, "country": "SE" },
-  "latency": { "mean": 12.4, "median": 11.8, "p25": 10.2, "p75": 13.9, "min": 9.7, "max": 18.4, "jitter": 1.6 },
-  "download": { "mean": 920.1, "median": 918.5, "p25": 905.0, "p75": 935.4, "min": 880.2, "max": 950.8 },
-  "upload":   { "mean": 480.3, "median": 482.0, "p25": 470.0, "p75": 490.1, "min": 455.0, "max": 502.0 }
-}
-```
-
-All bandwidth fields are megabits per second. Latency is milliseconds. `node` is the IP/geo identity (ip-api.com, fixed for the process); `meta` is Cloudflare's per-run view of the connection (edge PoP `colo`, TLS/HTTP version, country code) — overlapping but distinct from `node`.
-
-### `GET /speedtest/history?since=<epoch_ms>&limit=<N>` (Bearer)
-
-Rolling history. Both query params are optional.
-
-- `since` — return only rows where `Date.parse(startedAt) >= since`
-- `limit` — return only the most recent N rows (after `since` filter)
-
-```json
-{
-  "node": { "ip": "104.28.193.219", "country": "Sweden", "countryCode": "SE", "region": "Stockholm County", "city": "Stockholm", "isp": "Cloudflare, Inc." },
-  "count": 12,
-  "rows": [ /* same shape as /speedtest/last, newest LAST */ ]
-}
-```
-
-Order is chronological (oldest first within the returned slice). Consumers that want only the freshest sample should sort by `startedAt` or read `/speedtest/last` instead.
-
-### `GET /speedtest` (Bearer)
-
-Force a fresh run. The scheduler's `runOnce()` shares in-flight runs — if a scheduled run is currently happening, the on-demand caller waits for the same Promise rather than starting a parallel test. Avoids two simultaneous speedtests slugging it out for the same upstream pipe.
-
-Returns the result row (same shape as `/speedtest/last`).
-
-**Warning:** a fresh run costs ~50–250 MB of bandwidth. Don't make this a hot path. The CRM panel reserves it for an explicit "Run now" button.
+A speedtest and a geocheck may overlap: geocheck is ~40 small HTTPS requests and does not move the throughput number.
 
 ---
 
-## 5. Scheduler ([src/scheduler.js](src/scheduler.js))
+## 6. Storage ([src/storage.js](src/storage.js), [src/geocheck.js](src/geocheck.js))
 
-### Run loop
+`history.ndjson` in `DATA_DIR` — append-only ring, `MAX_HISTORY` rows, compacted (tmp + atomic rename) when the file exceeds 2×; malformed lines skipped on hydration. Unchanged from v1.
 
-`setTimeout`-based, NOT `setInterval`. Each tick re-schedules itself only after the current run resolves, so a slow run can't overlap the next one. The pattern at [scheduler.js:75–92](src/scheduler.js):
-
-```
-start() → scheduleNext(firstDelayMs)
-       └─ setTimeout(tick, delay)
-              └─ tick(): await runOnce()
-                     └─ runOnce(): runSpeedtest() → store.append(result)
-                            └─ scheduleNext()   ← always; even on error
-```
-
-### Cadence
-
-- **Default**: 30 min (`INTERVAL_MS=1800000`)
-- **Floor**: 60s — any `INTERVAL_MS < 60_000` is silently raised in the constructor. Protects upstream Cloudflare edge from a misconfigured env.
-- **First delay**: 5s (`FIRST_DELAY_MS`) — lets the container settle and the network come up before the first probe.
-- **Jitter**: ±`JITTER_PCT` (default 0.15, i.e. ±15%) applied to every interval. A fleet of agents that boot at the same `docker compose up` doesn't all fire at the same second.
-
-### In-flight sharing
-
-`scheduler.runOnce()` caches the current Promise in `this.inflight`. Both the scheduled tick AND on-demand calls (`GET /speedtest`) await the same Promise — no parallel speedtests. The cache clears in the `finally` block after the run resolves.
-
-### Error handling
-
-Errors in `tick()` are caught and logged but never thrown — the loop must stay alive even if one run fails. Common failure modes:
-
-- Transient network blip → next scheduled run usually succeeds
-- Cloudflare rate-limit (rare with 30-min cadence) → propagates as an error, logged, next run after the regular interval
-- Speedtest timeout → upstream lib enforces its own timeout; we just see a rejected Promise
-
-History is unaffected by failed runs — only successful results land in the store. Each tick (success or failure) prints a framed result box via `format.runBox` — see §3 Logging.
-
----
-
-## 6. Storage ([src/storage.js](src/storage.js))
-
-### Format
-
-Newline-delimited JSON (`history.ndjson`) inside `DATA_DIR` (default `./data` / `/data` in Docker). One result per line. Append-only on the hot path — `fs.appendFile()` after each speedtest.
-
-### Ring buffer
-
-In-memory `entries[]` array, newest last. Soft cap `maxEntries` (default 1500 rows). When the in-memory ring exceeds `maxEntries * 2`, the file is **compacted** (rewritten to match the ring), trimming the persistent file too.
-
-Default 1500 rows × 30 min cadence ≈ **31 days of history**.
-
-### Compaction (atomic rewrite)
-
-[storage.js:104–112](src/storage.js):
-
-1. Serialize the in-memory ring to `<file>.tmp`
-2. `fs.rename(tmp, file)` — atomic on POSIX, best-effort on Windows
-
-A crash mid-compact loses at most the last few runs — never corrupts the file. The next boot's `init()` re-hydrates from whatever ndjson exists, parses line-by-line, **skips malformed lines** (partial writes from a kill -9 mid-append).
-
-### Cold start
-
-On boot, [storage.js:42–63](src/storage.js):
-
-1. `mkdir -p` the directory
-2. Read the file (treat ENOENT as empty)
-3. Parse each line, skip malformed ones, keep the newest `maxEntries`
-4. If hydration dropped lines (malformed / truncation), compact once
-
-### Read patterns
-
-- `store.last()` — O(1), returns the newest entry or null
-- `store.query({since, limit})` — O(n) on the in-memory ring (n ≤ 1500 by default). Fast enough; no indexing needed.
+`geocheck.json` next to it — the last digest, written tmp + rename after every successful geocheck run and restored at boot so the panel is not blank for up to `GEOCHECK_INTERVAL_MS` after a container recreate.
 
 ---
 
 ## 7. Environment variables
 
-All read from `process.env` in [src/index.js](src/index.js). The Dockerfile sets `PORT=9101` and `DATA_DIR=/data`; compose passes the rest through.
+| Variable | Default | Notes |
+|---|---|---|
+| `TOKEN` | — | **required**; empty is fatal (framed error, exit 1) |
+| `PANEL_URL` | `""` | panel origin; must start with `http(s)://`; empty ⇒ standalone (WARN at boot, no push) |
+| `HEARTBEAT_MS` | `30000` | floor 5 s |
+| `INTERVAL_MS` · `JITTER_PCT` · `FIRST_DELAY_MS` | `1800000` · `0.15` · `5000` | speedtest cadence (floor 60 s) |
+| `CONCURRENCY` · `DOWNLOAD_SEC` · `UPLOAD_SEC` | `4` · `5` · `5` | upstream defaults are 6 · 10 · 10 |
+| `LATENCY_SEC` · `PROBE_INTERVAL_MS` · `PROBE_TIMEOUT_MS` | `2` · `250` · `2000` | idle-latency window and probe cadence (upstream values). **`LATENCY_SAMPLES` is gone.** |
+| `DOWNLOAD_BYTES_PER_REQ` · `UPLOAD_BYTES_PER_REQ` | `10000000` · `5000000` | upstream values (v1 used 25 MB / 10 MB) |
+| `GEOCHECK_BIN` | `geocheck` | bare name is searched on PATH; docker sets `/usr/local/bin/geocheck`; not found ⇒ one WARN, feature off |
+| `GEOCHECK_INTERVAL_MS` | `21600000` | floor 10 min; `0` disables |
+| `GEOCHECK_ARGS` | `--no-mtr --no-detect -4 -t 8` | appended after `--json --quiet` |
+| `PORT` · `BIND` | `9101` · `127.0.0.1` | **BIND changed from `0.0.0.0` in v2** |
+| `DATA_DIR` · `DATA_FILE` · `MAX_HISTORY` | `./data` (docker `/data`) · `${DATA_DIR}/history.ndjson` · `1500` | |
+| `LOG_LEVEL` · `LOG_JSON` · `LOG_COLOR` · `NO_COLOR` · `LOG_SERVICE` | `info` · unset · unset · unset · `aerio-agent` | same semantics as aerio-crm §12 |
 
-There is **no `SERVER_ID`** — the node self-identifies by its public IP + location, looked up once at boot via `ip-api.com` (see [geo.js](src/geo.js)). If the lookup fails the node still runs; `node` reads as all-`null` with an `error` string. No env var controls this.
-
-| Variable | Default | Required | Purpose |
-|---|---|---|---|
-| `TOKEN` | `""` | **required** | Operator-set shared secret, checked on every non-`/health` request (`Authorization: Bearer <TOKEN>`). An empty value is **fatal**: the agent prints a framed error box and exits 1 rather than booting as an open API. |
-| `PORT` | `9101` | no | HTTP listen port. Sits in Prometheus exporter range. |
-| `BIND` | `0.0.0.0` | no | Listen address. |
-| `INTERVAL_MS` | `1800000` (30 min) | no | Scheduler cadence. Floor 60s enforced. |
-| `JITTER_PCT` | `0.15` | no | ±N% spread on each interval. |
-| `FIRST_DELAY_MS` | `5000` | no | Delay before the very first run. |
-| `CONCURRENCY` | `4` | no | Parallel streams for download/upload. |
-| `DOWNLOAD_SEC` | `5` | no | Download phase duration. |
-| `UPLOAD_SEC` | `5` | no | Upload phase duration. |
-| `LATENCY_SAMPLES` | `20` | no | Latency probes per run. |
-| `DATA_DIR` | `./data` (Docker: `/data`) | no | Where `history.ndjson` lives. |
-| `DATA_FILE` | `${DATA_DIR}/history.ndjson` | no | Override the full path. |
-| `MAX_HISTORY` | `1500` | no | Soft cap on rows kept. |
-
-### Bandwidth budget
-
-Default settings (4 streams × 5s download + 5s upload) cost roughly **50–250 MB per run** depending on the link's actual capacity. At the default 30-minute cadence that's **~2–12 GB/day per node**.
-
-- Increase `CONCURRENCY` / `DOWNLOAD_SEC` for higher fidelity → more bandwidth per run.
-- Increase `INTERVAL_MS` to spend less → less timely data on the panel.
-
-The defaults are tuned to be economical; raise them only when investigating capacity issues.
+Bandwidth: ~50–250 MB per speedtest run at the defaults ⇒ ~2–12 GB/day/node at 30 min. geocheck is a few MB per run.
 
 ---
 
 ## 8. Build & deploy
 
-### Dockerfile ([Dockerfile](Dockerfile))
+- [Dockerfile](Dockerfile): `FROM ${GEOCHECK_IMAGE:-remnawave/geocheck:latest} AS geocheck` → `node:20-alpine`, copies `/usr/local/bin/geocheck`, `USER node`, `BIND=127.0.0.1`, no `npm install` layer (zero deps). Healthcheck `wget /health` every 30 s.
+- [docker-compose.yml](docker-compose.yml): one service `agent` (container `aerio-agent`), image from GHCR with `build: .` for local builds, **no `ports:`**, named volume `agent-data:/data`.
+- [.github/workflows/docker.yml](.github/workflows/docker.yml): `npm test` on every push/PR; on `main` and `v*` tags builds `linux/amd64,linux/arm64` and pushes `ghcr.io/wakeupmetha/cloudflare-speedtest-node:{latest,<semver>,sha-…}`.
+- The install line the panel shows (needs the image published — first push to `main` does that):
 
-Single-stage `node:20-alpine` image. ~30 lines:
-
-1. `WORKDIR /app`
-2. Copy `package.json`, run `npm install --omit=dev --no-audit --no-fund` (writes lockfile only — no real deps)
-3. Copy `src/`
-4. Set `DATA_DIR=/data`, `PORT=9101`, `EXPOSE 9101`
-5. `HEALTHCHECK` hits `/health` every 30s
-6. `CMD ["node", "src/index.js"]`
-
-### docker-compose ([docker-compose.yml](docker-compose.yml))
-
-One service `speedtest`, container name `aerio-speedtest`. Key bits:
-
-- `build: .` — local build (no registry push today)
-- `restart: unless-stopped`
-- Env from `.env` (see §7)
-- `ports: "${PUBLIC_PORT:-9101}:9101"`
-- Named volume `speedtest-data:/data` for persistent history
-- Healthcheck: `wget -qO- http://127.0.0.1:9101/health` every 30s
-
-### Deployment topology (planned)
-
-One container per VPN node, dropped alongside the existing `remnawave-node` + `xray-node` compose on each host. The agent itself doesn't know about siblings — it just listens and waits to be polled.
-
-External access path (planned):
-
-```
-console.aerio.my (CRM Fastify)
-       │ 60s poll
-       ▼ Bearer <token>
-https://<node-host>:9101/speedtest/last
+```bash
+docker run -d --name aerio-agent --restart unless-stopped \
+  -e PANEL_URL=https://console.aerio.my -e TOKEN=<token> \
+  -v aerio-agent-data:/data ghcr.io/wakeupmetha/cloudflare-speedtest-node:latest
 ```
 
-The CRM's [services/api/src/pollers/speedtest.ts](../aerio-crm/services/api/src/pollers/speedtest.ts) iterates all known agents (from `speedtest_tokens` table joined with Remnawave node list), fetches `/speedtest/last`, and caches the result in-process for the panel UI. On 404 (agent not yet run), the existing cache row is kept but flagged stale.
+No inbound port, no TLS on the node: the agent only connects out. Rotation: rotate on `/nodes`, edit `.env`, `docker compose up -d`.
 
 ---
 
-## 9. Known gaps & in-dev status
+## 9. Logs
 
-What's NOT verified end-to-end as of 2026-05-19:
+Format is aerio-crm's ([src/log.js](src/log.js) is a port of its `src/server/log.ts`): `HH:MM:SS  LEVEL  module  message  k=v …`, module tags `boot speedtest geocheck panel http`, colour unless `NO_COLOR`/`LOG_COLOR=0`, `LOG_JSON=1` for one object per line (boxes are then suppressed). Fields whose name looks like a credential print `<set>`/`<unset>`.
 
-| Item | Current state | What needs to happen |
-|---|---|---|
-| **Live deployment on a real VPN node** | Never deployed. Compose tested only on a dev workstation. | Pick one node (e.g. `de-fra-1`), drop the compose alongside its existing `remnawave-node` stack, run for 24h, verify `history.ndjson` accumulates rows and the panel can poll. |
-| **Token model** | **Resolved.** `TOKEN` is an opaque operator-set shared secret; empty is fatal at boot. No JWT parsing, no panel dependency. | Nothing — documented in §1/§4. If a future requirement needs signature validation, that's a new design. |
-| **CRM → agent integration tested** | CRM poller code exists in [aerio-crm/services/api/src/pollers/speedtest.ts](../aerio-crm/services/api/src/pollers/speedtest.ts); never run against this agent. | First-node deploy is the integration test. Watch for shape mismatches between `/speedtest/last` response and what the poller parses. |
-| **Token rotation flow** | Agent side is just an `.env` edit + `docker compose up -d` restart. Consumer must be updated with the same secret. | Walk through one rotation end-to-end. Document any rough edges here. |
-| **Migration of token storage to web-api** | Planned per the [drop-direct-db spec](../aerio-crm/docs/superpowers/specs/2026-05-19-crm-drop-direct-db-design.md). | Consumer-side only — the agent contract is unaffected. Update §1/§10 to reflect the new owner once it ships. |
-| **TLS termination** | Compose binds to `0.0.0.0:9101` plain HTTP. Consumers are expected to poll over HTTPS. | Either front the agent with Caddy on the node (recommended), or accept plain HTTP inside an internal network. Document the choice. |
-| **Cloudflare API drift** | Uses `speed.cloudflare.com` endpoints; no version pinning. | If Cloudflare changes the API, the speedtest run breaks silently (logged, but history just stops growing). Worth a synthetic alert from the panel side once we know what "normal cadence" looks like. |
-| **HTTP access log** | None — only the boot banner and per-run boxes are logged. Incoming requests (401/404/200) are silent. | When debugging the CRM integration, add a one-line request log in `server.js` (method, path, status, whether auth passed) so you can see whether the poller's calls arrive. |
-| **Tests** | None. | Decide if `vitest` or `node:test` is worth adding — given ~730 LOC and the small surface, manual smoke after each behavioral change may be enough. |
-| **Linter / formatter** | None. | Optional. Add or accept the current style. |
-| **Bandwidth dashboard** | The panel renders speedtest snapshots but there's no "agents are eating X GB/day total" view. | If a node operator complains about traffic bills, build this. |
+The framed **boot banner** and the per-run **result box** ([src/format.js](src/format.js)) are the two exceptions to "one line per event".
 
-When an item ships → move it out of this table and into the relevant section above (clearing any "in-dev" banner there too).
+Lines an operator is told to look for (README says the same):
+
+| Line | When |
+|---|---|
+| `INFO   panel   paired as "<node>"  url=… rtt=…` | first accepted heartbeat, and again on recovery with `after=<s>` |
+| `ERROR  panel   token rejected by panel — regenerate it on /nodes and restart the agent` | 401; once, then every 10 min |
+| `WARN   panel   unreachable  err="fetch failed: ECONNREFUSED" next=30s` | on transition; DEBUG while it persists |
+| `WARN   panel   node address mismatch — is this token for this node?  reported=… panelExpects=…` | once per distinct expected IP |
+| `INFO   panel   command received  cmd=speedtest` | a "Run now" from the panel |
+| `INFO   speedtest  run #N done  dl= ul= lat= jitter= bloat= stability= colo= elapsed=` · `WARN … had failed requests` · `WARN … failed  err=` | every run |
+| `INFO   geocheck   run #N done  available= restricted= blocked= country= reputation=` · `WARN  blocked: <names>` · `WARN  binary not found` · `WARN  run #N failed  err=` | every geocheck run |
+| `INFO/WARN  http  GET /path <status>  ms= auth=ok\|bad` | every local request except `/health` 2xx |
 
 ---
 
-## 10. Sibling repositories (orientation only)
+## 10. Measurement — parity with cloudflare-speed-cli
 
-This repo is a **leaf** in the Aerio architecture — it produces data, doesn't consume from anyone else (except `speed.cloudflare.com`).
+Read from the upstream's `src/engine/*.rs`, `metrics.rs`, `quality.rs`, `constants.rs`, `cli.rs` (2026-09-03). Each row states what the agent does now.
+
+| Behaviour | Agent |
+|---|---|
+| Idle latency probed for a duration (2 s) at 250 ms, 2 s timeout, warm-up excluded | same (`latency.js`) |
+| Jitter = sample stddev | same (`stats.stddev`) |
+| Loaded latency during download and upload (`during=download\|upload`), reported separately | same (`latency.loadedDownload/loadedUpload`) |
+| Bufferbloat = max(loaded median − idle median), grades A+/A/B/C/D/F at 5/30/60/200/400 ms | same (`quality.bufferbloat*`) |
+| Stability = worst-of CV % of steady-state throughput, A/B/C/D/F at 5/10/20/35 %, ≥3 samples | same (`quality.stability*`, `download.cvPct`) |
+| Steady state excludes max(20 %, 1 s) ramp-up; whole phase when no usable window | same |
+| Headline mbps = steady-state mean | same (`download.mbps`) |
+| `measId` per run, `Referer`, identifying User-Agent | same (`client.js`) |
+| Failed request ⇒ 100 ms backoff; 429 ⇒ halve download request size (floor 100 KB) | same; failures counted in `errors` |
+| Failed upload ⇒ bytes taken back out of the counter | same (not on the phase-end abort — those bytes went out) |
+| Meta from `cf-meta-*` headers | **differs**: `/cdn-cgi/trace` + `/meta` (both still answer; same fields) |
+| UDP packet loss via TURN | **not ported** (§11) |
+| Defaults 10 s × 6 streams, 10 MB / 5 MB per request | **differs on purpose**: 5 s × 4 (egress budget); request sizes match |
+| A run that moved no bytes | **stricter**: throws (`lastRunError`) instead of writing a row of zeros |
+
+---
+
+## 11. Not done / known gaps
+
+| Item | State |
+|---|---|
+| **Run on a real VPN node** | Not yet. First deploy = pick one node, run the install line, watch `paired as`, leave it a day, then clear the §top banner. |
+| **Published image** | The workflow exists; the first push to `main` publishes it. Until then the panel's install line names an image that does not exist yet. |
+| **Single-binary distribution** | Not planned: Node app; Docker is the install, `node src/index.js` the bare path. |
+| **History in the panel** | Not planned: the panel has no durable store; history stays on the agent (`/speedtest/history`, ndjson). |
+| **geocheck path analysis / tunnel detection** | Deliberately off (`--no-mtr --no-detect`): needs NET_RAW, takes minutes, different question. `GEOCHECK_ARGS` can turn it on; the digest ignores those sections. |
+| **UDP loss probe** (upstream TURN) | Not ported. |
+| **TLS on the local API** | Not needed: loopback only. |
+
+---
+
+## 12. Sibling repositories
 
 | Repo | Relationship |
 |---|---|
-| [`aerio-crm`](../aerio-crm) | **Consumer** — its [services/api](../aerio-crm/services/api/) Fastify polls `/speedtest/last` on every registered node; its [src/server/actions/speedtest.ts](../aerio-crm/src/server/actions/speedtest.ts) handles `AUTH_TOKEN` rotation. Detail: [aerio-crm/CLAUDE.md §4](../aerio-crm/CLAUDE.md). |
-| [`aerio-v2`](../aerio-v2) | **Future owner of the token registry** — per drop-direct-db spec, `speedtest_tokens` table writes move from CRM to `aerio-v2/services/web-api`. Detail: [aerio-v2/CLAUDE.md §4](../aerio-v2/CLAUDE.md). |
-| Remnawave node | **Co-located** — same host, parallel container. No direct communication. Pairing is by public IP / geo (this agent self-reports it); a consumer correlates the two by host/IP rather than a shared name. |
-| `aerio-web` | No interaction. Customer cabinet never touches the speedtest layer. |
-| Cloudflare | **Upstream** — `speed.cloudflare.com` is where this agent measures against. No auth required for the speedtest endpoints; public. |
-
-For any change that affects the wire format (`/speedtest/*` response shape, `Authorization` header semantics, port number), the CRM-side consumer must be updated in the same coordinated change. The CRM CLAUDE.md §4 + this file together are the contract.
+| [`aerio-crm`](../aerio-crm) | **The consumer.** `services/api/src/routes/agent.ts` ingests heartbeats; `services/api/src/routes/speedtest.ts` serves `/nodes`; `src/components/nodes/speedtest-agent.tsx` is the install dialog. §4 here and its CLAUDE.md §4 are the contract. |
+| `aerio-v2` | Stores the token map (`admin.speedtest.tokens`); no direct contact with the agent. |
+| Remnawave node | Co-located container; no communication. Pairing is by the token the panel minted for that node's name. |
+| [cloudflare-speed-cli](https://github.com/kavehtehrani/cloudflare-speed-cli) | Measurement reference — §10. |
+| [remnawave/geocheck](https://github.com/remnawave/geocheck) | Bundled binary — §4 digest, §7 `GEOCHECK_*`. |

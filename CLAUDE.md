@@ -4,7 +4,7 @@ This file is the single source of truth for everything currently implemented in 
 
 > **Status (2026-09-03): v2, push model. Wire contract validated by tests and by a local end-to-end run against the panel, not yet by a production node.** Every module has `node --test` coverage and the measurement path has been run live against `speed.cloudflare.com`. What has NOT happened: a real VPN node running the published image for a day. Clear this banner when that has.
 
-There are no separate spec files in this repo. The cross-repo design that produced v2 lives in the panel: [aerio-crm/docs/superpowers/specs/2026-09-03-speedtest-agent-v2-design.md](../aerio-crm/docs/superpowers/specs/2026-09-03-speedtest-agent-v2-design.md) until it is folded into `aerio-crm/CLAUDE.md`.
+There are no separate spec files in this repo. The cross-repo design that produced v2 is folded into the panel's docs: [aerio-crm/CLAUDE.md §4](../aerio-crm/CLAUDE.md) (registry, wire contract) and §8 (`/nodes` block); the implementation plan is kept at `aerio-crm/docs/superpowers/plans/2026-09-03-speedtest-agent-v2.md`.
 
 ---
 
@@ -54,7 +54,7 @@ The panel stores one opaque secret per Remnawave node name (`admin.speedtest.tok
 ## 2. Local development
 
 ```bash
-npm test                                            # 23 tests, ~2 s
+npm test                                            # 25 tests, ~3 s
 TOKEN=devtok node src/index.js                      # standalone: no push, local API only
 TOKEN=devtok PANEL_URL=http://localhost:3030 INTERVAL_MS=120000 node src/index.js   # against a local panel
 ```

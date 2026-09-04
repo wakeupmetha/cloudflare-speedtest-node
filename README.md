@@ -166,7 +166,7 @@ The ones that matter:
 | `HEARTBEAT_MS` | 30000 | Heartbeat cadence (floor 5 s) |
 | `INTERVAL_MS` | 1800000 | Speedtest cadence (floor 60 s), ±`JITTER_PCT` |
 | `GEOCHECK_INTERVAL_MS` | 21600000 | geocheck cadence (floor 10 min; 0 disables) |
-| `CONCURRENCY` / `DOWNLOAD_SEC` / `UPLOAD_SEC` | 4 / 5 / 5 | Streams and phase lengths (≈50–250 MB per run) |
+| `CONCURRENCY` / `DOWNLOAD_SEC` / `UPLOAD_SEC` | 4 / 5 / 5 | Streams and phase lengths. The phases are timed, not sized: a run moves whatever the link carries for 10 s — ~650 MB measured on a 500 Mbit link, ~31 GB/day at the 30 min default |
 | `LOG_LEVEL` | info | `none` … `debug`; `LOG_JSON=1`, `LOG_COLOR=0` |
 
 ## Token rotation

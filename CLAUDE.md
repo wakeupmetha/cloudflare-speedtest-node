@@ -224,7 +224,15 @@ A speedtest and a geocheck may overlap: geocheck is ~40 small HTTPS requests and
 | `DATA_DIR` · `DATA_FILE` · `MAX_HISTORY` | `./data` (docker `/data`) · `${DATA_DIR}/history.ndjson` · `1500` | |
 | `LOG_LEVEL` · `LOG_JSON` · `LOG_COLOR` · `NO_COLOR` · `LOG_SERVICE` | `info` · unset · unset · unset · `aerio-agent` | same semantics as aerio-crm §12 |
 
-Bandwidth: ~50–250 MB per speedtest run at the defaults ⇒ ~2–12 GB/day/node at 30 min. geocheck is a few MB per run.
+Bandwidth: **a run moves whatever the link can carry for 10 s** — the phases are
+timed, not sized, so the cost scales with the node's speed rather than being
+capped. Measured 2026-09-03 on a 400–570 Mbit link: **591 MB and 711 MB** for two
+consecutive runs (avg 651 MB), i.e. **~31 GB/day/node** at the 30 min default and
+~940 GB/month. A gigabit node costs about double that. This paragraph claimed
+“~50–250 MB per run ⇒ 2–12 GB/day” until that measurement; the estimate was
+3–15× low. Cut it with `INTERVAL_MS` first (capacity does not change every
+30 min), then `DOWNLOAD_SEC`/`UPLOAD_SEC`/`CONCURRENCY`. geocheck is a few MB per
+run and the heartbeat is ~1 KB every 30 s — neither is worth tuning.
 
 ---
 

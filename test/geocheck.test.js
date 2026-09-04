@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { digestGeocheck, runGeocheck, loadDigest, saveDigest, resolveGeocheckBin } from '../src/geocheck.js';
 
 const fixtureText = await readFile(new URL('./fixtures/geocheck.json', import.meta.url), 'utf8');
@@ -78,7 +78,9 @@ test('digest round-trips through disk; missing file is null', async () => {
 });
 
 test('resolveGeocheckBin: PATH search and absolute paths', async () => {
-  assert.ok(await resolveGeocheckBin('node'));
+  // basename, not a literal 'node': on Windows the runtime on PATH is node.exe
+  // and the literal made this the one test that failed on a dev machine.
+  assert.ok(await resolveGeocheckBin(basename(process.execPath)));
   assert.equal(await resolveGeocheckBin('definitely-not-a-binary-xyz'), null);
   assert.equal(await resolveGeocheckBin('/nope/geocheck'), null);
   assert.equal(await resolveGeocheckBin(''), null);
